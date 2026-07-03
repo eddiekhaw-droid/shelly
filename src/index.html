@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Shelly PDF</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header id="toolbar">
+    <button id="btn-sidebar" class="icon" title="Toggle thumbnails (Ctrl+B)">&#9776;</button>
+    <button id="btn-open" title="Open a PDF (Ctrl+O)">Open</button>
+    <span class="sep"></span>
+
+    <button id="btn-prev" class="icon" title="Previous page">&#9650;</button>
+    <input id="page-num" type="number" min="1" value="1" disabled />
+    <span id="page-total" class="dim">/ 0</span>
+    <button id="btn-next" class="icon" title="Next page">&#9660;</button>
+    <span class="sep"></span>
+
+    <button id="btn-zoom-out" class="icon" title="Zoom out">&minus;</button>
+    <select id="zoom-select" title="Zoom">
+      <option value="0.5">50%</option>
+      <option value="0.75">75%</option>
+      <option value="1">100%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+      <option value="4">400%</option>
+      <option value="fit-width" selected>Fit width</option>
+      <option value="fit-page">Fit page</option>
+    </select>
+    <button id="btn-zoom-in" class="icon" title="Zoom in">+</button>
+    <span class="sep"></span>
+
+    <div class="tool-group">
+      <button id="tool-select" class="tool active" title="Select / pan">Select</button>
+      <button id="tool-text" class="tool" title="Click a page to add a text box">+ Text</button>
+      <button id="tool-image" class="tool" title="Place an image on a page">+ Image</button>
+    </div>
+    <span id="text-props">
+      <input id="text-size" type="number" min="6" max="96" value="16" title="Font size (pt)" />
+      <input id="text-color" type="color" value="#d92626" title="Text color" />
+    </span>
+    <span class="spacer"></span>
+
+    <button id="btn-find" class="icon" title="Find (Ctrl+F)">&#128269;</button>
+    <button id="btn-undo" class="icon" title="Undo (Ctrl+Z)" disabled>&#8630;</button>
+    <button id="btn-redo" class="icon" title="Redo (Ctrl+Shift+Z)" disabled>&#8631;</button>
+    <span class="sep"></span>
+    <button id="btn-save" disabled title="Save (Ctrl+S)">Save</button>
+    <button id="btn-save-as" disabled title="Save As (Ctrl+Shift+S)">Save As</button>
+    <button id="btn-print" class="icon" disabled title="Print (Ctrl+P)">&#128424;</button>
+  </header>
+
+  <div id="main">
+    <aside id="sidebar">
+      <div id="thumb-actions">
+        <button id="pg-rotate-l" class="icon" title="Rotate left 90&deg;" disabled>&#8634;</button>
+        <button id="pg-rotate-r" class="icon" title="Rotate right 90&deg;" disabled>&#8635;</button>
+        <button id="pg-delete" class="icon" title="Delete page(s)" disabled>&#128465;</button>
+        <button id="pg-extract" class="icon" title="Extract page(s) to a new PDF" disabled>&#8659;</button>
+        <button id="pg-insert" class="icon" title="Insert pages from another PDF" disabled>&#10133;</button>
+      </div>
+      <div id="thumbs"></div>
+    </aside>
+
+    <div id="viewer-wrap">
+      <div id="findbar" hidden>
+        <input id="find-input" type="text" placeholder="Find in document&hellip;" />
+        <span id="find-count" class="dim"></span>
+        <button id="find-prev" class="icon" title="Previous match (Shift+Enter)">&#9650;</button>
+        <button id="find-next" class="icon" title="Next match (Enter)">&#9660;</button>
+        <button id="find-close" class="icon" title="Close (Esc)">&#10005;</button>
+      </div>
+      <div id="viewer" tabindex="0"></div>
+      <div id="empty-state">
+        <div class="logo">Shelly&nbsp;PDF</div>
+        <p>Drop a PDF anywhere, or</p>
+        <button id="empty-open">Open a PDF&hellip;</button>
+      </div>
+      <div id="toast" hidden></div>
+    </div>
+  </div>
+
+  <footer id="statusbar">
+    <span id="status-file">No document</span>
+    <span class="spacer"></span>
+    <span id="status-info"></span>
+  </footer>
+
+  <!-- Fallbacks used when running outside Electron (dev/testing in a browser) -->
+  <input id="file-fallback" type="file" accept="application/pdf" hidden />
+  <input id="image-fallback" type="file" accept="image/png,image/jpeg" hidden />
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
