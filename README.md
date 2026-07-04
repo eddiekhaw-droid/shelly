@@ -14,9 +14,12 @@ leave your machine.
   edits, and undo history (Ctrl+W closes a tab)
 - Open PDFs via dialog (multi-select) or drag-and-drop
 - Continuous scrolling, page navigation, thumbnail sidebar
-- Zoom: presets, fit-width, fit-page (`Ctrl+=`, `Ctrl+-`, `Ctrl+0/1/2`)
+- Zoom: Ctrl+mouse-wheel, presets, fit-width, fit-page (`Ctrl+=`, `Ctrl+-`, `Ctrl+0/1/2`);
+  the zoom box shows the live percentage
 - Selectable text and full-document search with highlighted matches (`Ctrl+F`)
-- Print (`Ctrl+P`)
+- Print (`Ctrl+P`) — pages are re-rendered at ~216 DPI for crisp paper output
+- Installed builds register as a PDF viewer: double-click a PDF in Explorer/Finder
+  to open it in a new tab of the running window
 
 **Organize pages** (thumbnail sidebar — click to select, `Ctrl`/`Shift`-click for multi-select)
 - Rotate pages left/right
@@ -26,8 +29,8 @@ leave your machine.
 - Insert/merge all pages from another PDF
 
 **Annotate & fill**
-- **Highlight** — drag over text to highlight it (drawn with Multiply blending so text
-  stays legible); pick the color while the tool is active
+- **Highlight** — drag over text to highlight it; saved as a genuine /Highlight
+  annotation (selectable/removable in Acrobat), pick the color while the tool is active
 - **+ Note** — sticky notes, saved as genuine PDF `/Text` annotations that Acrobat and
   other readers show as comments
 - **Form filling** — PDFs with AcroForm fields (text, checkbox, radio, dropdown) are
@@ -36,6 +39,7 @@ leave your machine.
 
 **Add content**
 - **+ Text** — click anywhere on a page to add a text box; set font size and color;
+  optional white **Fill** behind the text to cover-and-correct existing content;
   drag to reposition; edits are baked into the PDF when you save
 - **+ Image** — place a PNG/JPEG stamp on a page; drag to move, corner handle to resize
 

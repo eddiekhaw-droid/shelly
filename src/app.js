@@ -52,6 +52,7 @@ function makeBrowserHost() {
     setDirty: () => {},
     confirmClose: () => window.close(),
     onMenu: () => {},
+    onOpenFiles: () => {},
   };
 }
 
@@ -140,6 +141,7 @@ class Session {
       if (item?.type === 'text') {
         $('text-size').value = item.size;
         $('text-color').value = item.color;
+        $('text-bg').checked = !!item.bg;
         $('text-props').classList.add('visible');
       }
     });
@@ -450,16 +452,29 @@ function refreshUi() {
   }
 }
 
+let customZoomOption = null;
+
 function syncZoomSelect() {
   if (!current) return;
   const select = $('zoom-select');
   const mode = current.viewer.zoomMode;
   if (typeof mode === 'string') {
     select.value = mode;
-  } else {
-    const preset = [...select.options].find((o) => Number(o.value) === mode);
-    select.value = preset ? preset.value : '';
+    return;
   }
+  const preset = [...select.options].find((o) => o !== customZoomOption && Number(o.value) === mode);
+  if (preset) {
+    select.value = preset.value;
+    return;
+  }
+  // Show the actual percentage for in-between zoom levels, like Acrobat.
+  if (!customZoomOption) {
+    customZoomOption = document.createElement('option');
+    customZoomOption.value = 'custom';
+    select.prepend(customZoomOption);
+  }
+  customZoomOption.textContent = `${Math.round(current.viewer.scale * 100)}%`;
+  select.value = 'custom';
 }
 
 async function openPdfDialog() {
@@ -510,9 +525,12 @@ async function chooseImageTool() {
 async function print() {
   if (!current) return;
   toast('Preparing pages for printing…');
-  await current.viewer.renderAllPages();
+  await current.viewer.renderForPrint();
   window.print();
 }
+
+// Release the high-resolution print canvases once the dialog is gone.
+window.addEventListener('afterprint', () => current?.viewer.restoreScreenResolution());
 
 // ---- signature pad ----
 
@@ -631,9 +649,34 @@ $('btn-zoom-out').addEventListener('click', async () => {
 $('zoom-select').addEventListener('change', async (e) => {
   if (!current) return;
   const v = e.target.value;
+  if (v === 'custom') return; // the display-only entry for in-between zooms
   await current.viewer.setZoom(v === 'fit-width' || v === 'fit-page' ? v : Number(v));
   refreshUi();
 });
+
+// Ctrl + mouse wheel (or trackpad pinch) zooms, like Acrobat.
+let wheelZoomFactor = 1;
+let wheelZoomPending = false;
+$('viewers').addEventListener(
+  'wheel',
+  (e) => {
+    if (!e.ctrlKey || !current) return;
+    e.preventDefault();
+    wheelZoomFactor *= e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    if (wheelZoomPending) return;
+    wheelZoomPending = true;
+    setTimeout(async () => {
+      const factor = wheelZoomFactor;
+      wheelZoomFactor = 1;
+      wheelZoomPending = false;
+      if (!current || factor === 1) return;
+      await current.viewer.zoomBy(factor);
+      syncZoomSelect();
+      refreshUi();
+    }, 80);
+  },
+  { passive: false }
+);
 
 $('tool-select').addEventListener('click', () => setTool('select'));
 $('tool-highlight').addEventListener('click', () => setTool('highlight'));
@@ -645,6 +688,7 @@ $('text-size').addEventListener('change', (e) =>
   current?.overlays.setTextProps({ size: Math.max(6, Math.min(96, Number(e.target.value) || 16)) })
 );
 $('text-color').addEventListener('input', (e) => current?.overlays.setTextProps({ color: e.target.value }));
+$('text-bg').addEventListener('change', (e) => current?.overlays.setTextProps({ bg: e.target.checked }));
 
 $('pg-rotate-l').addEventListener('click', () => current?.rotateSelection(-90));
 $('pg-rotate-r').addEventListener('click', () => current?.rotateSelection(90));
@@ -745,6 +789,12 @@ host.onMenu(async (cmd) => {
     },
   };
   await actions[cmd]?.();
+});
+
+// PDFs handed over by the OS: app launch arguments, double-clicked files
+// routed from a second instance, or macOS open-file events.
+host.onOpenFiles?.(async (files) => {
+  for (const file of files) await openBytes(file.data, file.path, file.name);
 });
 
 // ---- keyboard fallback when running in a plain browser (no app menu) ----

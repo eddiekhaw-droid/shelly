@@ -145,19 +145,27 @@ export class Viewer extends EventTarget {
     return p.rendering;
   }
 
+  #screenRatio() {
+    return Math.min(window.devicePixelRatio || 1, 3);
+  }
+
+  async #paintCanvas(p, ratio) {
+    p.canvas.width = Math.floor(p.viewport.width * ratio);
+    p.canvas.height = Math.floor(p.viewport.height * ratio);
+    p.canvas.style.width = `${Math.floor(p.viewport.width)}px`;
+    p.canvas.style.height = `${Math.floor(p.viewport.height)}px`;
+    const ctx = p.canvas.getContext('2d');
+    await p.proxy.render({
+      canvasContext: ctx,
+      viewport: p.viewport,
+      transform: ratio !== 1 ? [ratio, 0, 0, ratio, 0, 0] : undefined,
+    }).promise;
+    p.pixelRatio = ratio;
+  }
+
   async #renderPageInner(p, i) {
     {
-      const dpr = Math.min(window.devicePixelRatio || 1, 3);
-      p.canvas.width = Math.floor(p.viewport.width * dpr);
-      p.canvas.height = Math.floor(p.viewport.height * dpr);
-      p.canvas.style.width = `${Math.floor(p.viewport.width)}px`;
-      p.canvas.style.height = `${Math.floor(p.viewport.height)}px`;
-      const ctx = p.canvas.getContext('2d');
-      await p.proxy.render({
-        canvasContext: ctx,
-        viewport: p.viewport,
-        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
-      }).promise;
+      await this.#paintCanvas(p, this.#screenRatio());
 
       try {
         const textLayer = new pdfjsLib.TextLayer({
@@ -204,6 +212,40 @@ export class Viewer extends EventTarget {
 
   async renderAllPages() {
     for (let i = 0; i < this.pages.length; i++) await this.renderPage(i);
+  }
+
+  /**
+   * Repaint every page canvas at ~targetDpi so printed output is crisp
+   * regardless of the on-screen zoom. Call restoreScreenResolution() after
+   * printing to release the extra memory.
+   */
+  async renderForPrint(targetDpi = 216) {
+    await this.renderAllPages();
+    // Canvas CSS size is viewport points × scale; effective print DPI is
+    // 72 × scale × pixelRatio.
+    const ratio = Math.min(4, targetDpi / 72 / this.scale);
+    for (const p of this.pages) {
+      if (p.rendered && (p.pixelRatio || 0) < ratio) {
+        try {
+          await this.#paintCanvas(p, ratio);
+        } catch {
+          break; // document replaced mid-print-prep
+        }
+      }
+    }
+  }
+
+  async restoreScreenResolution() {
+    const ratio = this.#screenRatio();
+    for (const p of this.pages) {
+      if (p.rendered && p.pixelRatio !== ratio) {
+        try {
+          await this.#paintCanvas(p, ratio);
+        } catch {
+          break;
+        }
+      }
+    }
   }
 
   async setZoom(mode) {

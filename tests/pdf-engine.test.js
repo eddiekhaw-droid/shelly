@@ -14,6 +14,7 @@ import {
   applyFormValues,
   readFormValues,
   countTextAnnotations,
+  countAnnotations,
 } from '../src/pdf-engine.js';
 
 // Pages get distinct widths (100, 110, 120, …) so each page stays
@@ -165,7 +166,7 @@ describe('bakeOverlays', () => {
     expect(width).toBe(130);
   });
 
-  it('draws highlight rectangles', async () => {
+  it('adds highlights as real /Highlight annotations', async () => {
     const bytes = await bakeOverlays(fixture5, [
       {
         type: 'highlight',
@@ -175,6 +176,25 @@ describe('bakeOverlays', () => {
           { x: 10, y: 420, width: 60, height: 16 },
         ],
         color: { r: 1, g: 0.9, b: 0.3 },
+      },
+    ]);
+    expect(await countAnnotations(bytes, 0, 'Highlight')).toBe(1);
+    expect(await countAnnotations(bytes, 1, 'Highlight')).toBe(0);
+    expect(await getPageCount(bytes)).toBe(5);
+  });
+
+  it('draws an opaque fill behind text overlays that request it', async () => {
+    const bytes = await bakeOverlays(fixture5, [
+      {
+        type: 'text',
+        pageIndex: 0,
+        x: 20,
+        y: 400,
+        text: 'Corrected value',
+        size: 14,
+        lineHeight: 17.5,
+        color: { r: 0, g: 0, b: 0 },
+        bg: { x: 18, y: 394, width: 120, height: 20 },
       },
     ]);
     expect(bytes.length).toBeGreaterThan(fixture5.length);

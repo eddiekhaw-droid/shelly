@@ -1,5 +1,7 @@
-// Text search across the document. Matches are located per text item using
-// pdf.js text content, and painted as highlight boxes in each page's hlLayer.
+// Text search across the document. Each page's text runs are concatenated
+// into one string (line breaks become spaces) so phrases match even when the
+// PDF splits them across runs — the same behavior as Acrobat's Find. Matches
+// are painted as highlight boxes in each page's hlLayer.
 
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 
@@ -7,8 +9,8 @@ export class Searcher {
   constructor(viewer, ui) {
     this.viewer = viewer;
     this.ui = ui; // { count } element for "3/17"
-    this.items = null; // per page: [{ str, transform, width }]
-    this.matches = [];
+    this.pages = null; // per page: { text, runs: [{ item, start }] }
+    this.matches = []; // { page, segments: [{ item, startFrac, endFrac }] }
     this.active = -1;
     this.query = '';
 
@@ -16,7 +18,7 @@ export class Searcher {
   }
 
   reset() {
-    this.items = null;
+    this.pages = null;
     this.clear();
   }
 
@@ -29,15 +31,22 @@ export class Searcher {
   }
 
   async #collect() {
-    if (this.items) return;
-    this.items = [];
+    if (this.pages) return;
+    this.pages = [];
     for (let i = 0; i < this.viewer.pageCount; i++) {
       const content = await this.viewer.pages[i].proxy.getTextContent();
-      this.items.push(
-        content.items
-          .filter((it) => 'str' in it && it.str)
-          .map((it) => ({ str: it.str, transform: it.transform, width: it.width }))
-      );
+      let text = '';
+      const runs = [];
+      for (const it of content.items) {
+        if (!('str' in it)) continue;
+        if (it.str) {
+          runs.push({ item: it, start: text.length });
+          text += it.str;
+        }
+        // A line break acts as a single space, like Acrobat's Find.
+        if (it.hasEOL) text += ' ';
+      }
+      this.pages.push({ text: text.toLowerCase(), runs });
     }
   }
 
@@ -48,20 +57,13 @@ export class Searcher {
     if (query.trim().length >= 1) {
       await this.#collect();
       const q = query.toLowerCase();
-      for (let page = 0; page < this.items.length; page++) {
-        for (const item of this.items[page]) {
-          const hay = item.str.toLowerCase();
-          let from = 0;
-          let at;
-          while ((at = hay.indexOf(q, from)) !== -1) {
-            this.matches.push({
-              page,
-              item,
-              startFrac: at / item.str.length,
-              endFrac: (at + q.length) / item.str.length,
-            });
-            from = at + q.length;
-          }
+      for (let page = 0; page < this.pages.length; page++) {
+        const { text } = this.pages[page];
+        let from = 0;
+        let at;
+        while ((at = text.indexOf(q, from)) !== -1) {
+          this.matches.push({ page, segments: this.#segments(page, at, at + q.length) });
+          from = at + q.length;
         }
       }
     }
@@ -70,6 +72,25 @@ export class Searcher {
     this.#updateCount();
     this.#scrollToActive();
     return this.matches.length;
+  }
+
+  /** Map a [start, end) range in the page string back onto its text runs. */
+  #segments(page, start, end) {
+    const segments = [];
+    for (const run of this.pages[page].runs) {
+      const len = run.item.str.length;
+      const s = Math.max(start, run.start);
+      const e = Math.min(end, run.start + len);
+      if (s < e) {
+        segments.push({
+          item: run.item,
+          startFrac: (s - run.start) / len,
+          endFrac: (e - run.start) / len,
+        });
+      }
+      if (run.start >= end) break;
+    }
+    return segments;
   }
 
   next(dir = 1) {
@@ -89,16 +110,16 @@ export class Searcher {
       : '';
   }
 
-  /** Viewport-space rect for a match at the current zoom. */
-  #matchRect(m) {
-    const viewport = this.viewer.viewport(m.page);
-    const tx = pdfjsLib.Util.transform(viewport.transform, m.item.transform);
+  /** Viewport-space rect for one segment of a match at the current zoom. */
+  #segmentRect(pageIndex, seg) {
+    const viewport = this.viewer.viewport(pageIndex);
+    const tx = pdfjsLib.Util.transform(viewport.transform, seg.item.transform);
     const fontHeight = Math.hypot(tx[2], tx[3]);
-    const widthView = m.item.width * viewport.scale;
+    const widthView = seg.item.width * viewport.scale;
     return {
-      x: tx[4] + m.startFrac * widthView,
+      x: tx[4] + seg.startFrac * widthView,
       y: tx[5] - fontHeight,
-      w: Math.max(2, (m.endFrac - m.startFrac) * widthView),
+      w: Math.max(2, (seg.endFrac - seg.startFrac) * widthView),
       h: fontHeight * 1.15,
     };
   }
@@ -107,21 +128,24 @@ export class Searcher {
     if (!this.viewer.pages.length) return;
     for (const p of this.viewer.pages) p.hlLayer.textContent = '';
     this.matches.forEach((m, idx) => {
-      const rect = this.#matchRect(m);
-      const div = document.createElement('div');
-      div.className = idx === this.active ? 'hl active' : 'hl';
-      div.style.left = `${rect.x}px`;
-      div.style.top = `${rect.y}px`;
-      div.style.width = `${rect.w}px`;
-      div.style.height = `${rect.h}px`;
-      this.viewer.pages[m.page].hlLayer.appendChild(div);
+      for (const seg of m.segments) {
+        const rect = this.#segmentRect(m.page, seg);
+        const div = document.createElement('div');
+        div.className = idx === this.active ? 'hl active' : 'hl';
+        div.style.left = `${rect.x}px`;
+        div.style.top = `${rect.y}px`;
+        div.style.width = `${rect.w}px`;
+        div.style.height = `${rect.h}px`;
+        this.viewer.pages[m.page].hlLayer.appendChild(div);
+      }
     });
   }
 
   #scrollToActive() {
     if (this.active < 0) return;
     const m = this.matches[this.active];
-    const rect = this.#matchRect(m);
+    if (!m.segments.length) return;
+    const rect = this.#segmentRect(m.page, m.segments[0]);
     this.viewer.scrollToPoint(m.page, rect.y);
   }
 }

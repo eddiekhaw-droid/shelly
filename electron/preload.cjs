@@ -8,4 +8,5 @@ contextBridge.exposeInMainWorld('shelly', {
   setDirty: (dirty) => ipcRenderer.send('doc:set-dirty', !!dirty),
   confirmClose: () => ipcRenderer.send('app:confirm-close'),
   onMenu: (fn) => ipcRenderer.on('menu', (_e, cmd) => fn(cmd)),
+  onOpenFiles: (fn) => ipcRenderer.on('open-files', (_e, files) => fn(files)),
 });

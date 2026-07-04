@@ -79,6 +79,7 @@ input[type="color"] {
 }
 #page-num { width: 48px; }
 #text-props, #hl-props { display: none; align-items: center; gap: 4px; }
+label.checkbox { display: inline-flex; align-items: center; gap: 3px; cursor: pointer; white-space: nowrap; }
 #text-props.visible, #hl-props.visible { display: inline-flex; }
 
 /* ---------- tab bar ---------- */
@@ -200,6 +201,12 @@ input[type="color"] {
   margin: 0 auto 16px;
   background: #fff;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+  /* pdf.js's stylesheet only defines this chain under .pdfViewer .page;
+     the text/annotation layers size themselves from these variables. */
+  --user-unit: 1;
+  --total-scale-factor: calc(var(--scale-factor) * var(--user-unit));
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
 }
 .page canvas { display: block; position: absolute; inset: 0; z-index: 1; }
 

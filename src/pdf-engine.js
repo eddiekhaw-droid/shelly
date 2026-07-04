@@ -137,6 +137,17 @@ export async function bakeOverlays(bytes, overlays) {
     if (ov.type === 'text') {
       if (!ov.text.trim()) continue;
       if (!font) font = await doc.embedFont(StandardFonts.Helvetica);
+      if (ov.bg) {
+        // Opaque fill behind the text — used to cover & replace content.
+        page.drawRectangle({
+          x: ov.bg.x,
+          y: ov.bg.y,
+          width: ov.bg.width,
+          height: ov.bg.height,
+          color: rgb(1, 1, 1),
+          rotate,
+        });
+      }
       page.drawText(ov.text, {
         x: ov.x,
         y: ov.y,
@@ -157,23 +168,55 @@ export async function bakeOverlays(bytes, overlays) {
         rotate,
       });
     } else if (ov.type === 'highlight') {
-      for (const r of ov.rects) {
-        page.drawRectangle({
-          x: r.x,
-          y: r.y,
-          width: r.width,
-          height: r.height,
-          color: rgb(ov.color.r, ov.color.g, ov.color.b),
-          blendMode: 'Multiply',
-          rotate,
-        });
-      }
+      addHighlightAnnotation(doc, ov);
     } else if (ov.type === 'note') {
       if (!ov.text.trim()) continue;
       addTextAnnotation(doc, ov);
     }
   }
   return doc.save();
+}
+
+/**
+ * Append a real /Highlight annotation (the kind Acrobat's highlighter makes:
+ * selectable and deletable later). Readers without an appearance stream
+ * synthesize one from QuadPoints + C, which is what Acrobat and pdf.js do.
+ */
+function addHighlightAnnotation(doc, ov) {
+  const page = doc.getPage(ov.pageIndex);
+  const quads = [];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const r of ov.rects) {
+    // QuadPoints order: top-left, top-right, bottom-left, bottom-right
+    quads.push(r.x, r.y + r.height, r.x + r.width, r.y + r.height, r.x, r.y, r.x + r.width, r.y);
+    minX = Math.min(minX, r.x);
+    minY = Math.min(minY, r.y);
+    maxX = Math.max(maxX, r.x + r.width);
+    maxY = Math.max(maxY, r.y + r.height);
+  }
+  const annot = doc.context.obj({
+    Type: 'Annot',
+    Subtype: 'Highlight',
+    Rect: [minX, minY, maxX, maxY],
+    QuadPoints: quads,
+    C: [ov.color.r, ov.color.g, ov.color.b],
+    CA: 1,
+    T: PDFHexString.fromText('Highlight'),
+    F: 4, // print
+  });
+  appendAnnot(page, doc.context.register(annot));
+}
+
+function appendAnnot(page, ref) {
+  const annots = page.node.lookup(PDFName.of('Annots'));
+  if (annots instanceof PDFArray) {
+    annots.push(ref);
+  } else {
+    page.node.set(PDFName.of('Annots'), page.doc.context.obj([ref]));
+  }
 }
 
 /** Append a /Text (sticky note) annotation to a page. */
@@ -190,13 +233,7 @@ function addTextAnnotation(doc, ov) {
     C: [ov.color.r, ov.color.g, ov.color.b],
     F: 4, // print
   });
-  const ref = doc.context.register(annot);
-  const annots = page.node.lookup(PDFName.of('Annots'));
-  if (annots instanceof PDFArray) {
-    annots.push(ref);
-  } else {
-    page.node.set(PDFName.of('Annots'), doc.context.obj([ref]));
-  }
+  appendAnnot(page, doc.context.register(annot));
 }
 
 /**
@@ -246,15 +283,18 @@ export async function readFormValues(bytes) {
   return out;
 }
 
-/** Count /Text annotations on a page (used by tests). */
-export async function countTextAnnotations(bytes, pageIndex) {
+/** Count annotations of a subtype ('Text', 'Highlight', …) on a page. */
+export async function countAnnotations(bytes, pageIndex, subtype) {
   const doc = await load(bytes);
   const annots = doc.getPage(pageIndex).node.lookup(PDFName.of('Annots'));
   if (!(annots instanceof PDFArray)) return 0;
   let count = 0;
   for (let i = 0; i < annots.size(); i++) {
     const a = annots.lookup(i);
-    if (a && a.get(PDFName.of('Subtype')) === PDFName.of('Text')) count++;
+    if (a && a.get(PDFName.of('Subtype')) === PDFName.of(subtype)) count++;
   }
   return count;
 }
+
+export const countTextAnnotations = (bytes, pageIndex) =>
+  countAnnotations(bytes, pageIndex, 'Text');

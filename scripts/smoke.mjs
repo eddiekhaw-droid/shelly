@@ -300,6 +300,109 @@ check(
   await page.evaluate(() => !!window.__shellyTest.state && document.querySelectorAll('.viewer.active').length === 1)
 );
 
+// ---------------------------------------------------------------------------
+// Acrobat-parity fixes
+// ---------------------------------------------------------------------------
+
+// fresh tab
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, '/tmp/fixture.pdf', 'fixture.pdf');
+}, Buffer.from(fixture).toString('base64'));
+await page.waitForFunction(() => document.querySelectorAll('.viewer.active .textLayer span').length > 0);
+
+// --- search across text runs (phrase spans a line break in the PDF) ---
+await page.click('#btn-find');
+await page.fill('#find-input', 'page 1. shelly');
+await page.waitForFunction(() => document.querySelector('#find-count').textContent.trim() !== '');
+const crossRun = (await page.textContent('#find-count')).trim();
+check('search matches phrases across text runs / line breaks', crossRun === '1 / 1', crossRun);
+await page.click('#find-close');
+
+// --- Ctrl+wheel zooms ---
+const scaleBefore = await page.evaluate(() => window.__shellyTest.viewer.scale);
+const viewerBox = await page.evaluate(() => {
+  const r = document.querySelector('.viewer.active').getBoundingClientRect();
+  return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+});
+await page.mouse.move(viewerBox.x, viewerBox.y);
+await page.keyboard.down('Control');
+await page.mouse.wheel(0, -120);
+await page.keyboard.up('Control');
+await page.waitForFunction(
+  (prev) => window.__shellyTest.viewer.scale > prev,
+  scaleBefore,
+  { timeout: 10000 }
+);
+check('Ctrl+wheel zooms in', true);
+
+// --- custom zoom level is displayed as a percentage ---
+const zoomLabel = await page.evaluate(() => {
+  const sel = document.getElementById('zoom-select');
+  return sel.selectedOptions[0]?.textContent.trim() ?? '';
+});
+check('zoom dropdown shows the actual percentage', /^\d+%$/.test(zoomLabel), zoomLabel);
+
+// --- text box with white fill ---
+await page.click('#tool-text');
+await page.check('#text-bg');
+await page.click('.viewer.active .page', { position: { x: 300, y: 500 } });
+await page.keyboard.type('CORRECTED');
+await page.click('#status-file');
+const fillOk = await page.evaluate(() => {
+  const payload = window.__shellyTest.overlays.bakePayload();
+  const t = payload.find((p) => p.type === 'text' && p.text === 'CORRECTED');
+  return !!(t && t.bg && t.bg.width > 0 && t.bg.height > 0);
+});
+check('text box can carry an opaque fill', fillOk);
+await page.uncheck('#text-bg');
+
+// --- highlights save as annotations AND render when the file is reopened ---
+await page.click('#tool-highlight');
+const hlSpan = await page.evaluate(() => {
+  const span = document.querySelector('.viewer.active .textLayer span');
+  const r = span.getBoundingClientRect();
+  return { x: r.x, y: r.y, w: r.width, h: r.height };
+});
+await page.mouse.move(hlSpan.x + 2, hlSpan.y + hlSpan.h / 2);
+await page.mouse.down();
+await page.mouse.move(hlSpan.x + hlSpan.w - 2, hlSpan.y + hlSpan.h / 2, { steps: 6 });
+await page.mouse.up();
+await page.waitForFunction(() => window.__shellyTest.overlays.items.some((i) => i.type === 'highlight'));
+
+const hlInfo = await page.evaluate(async () => {
+  const t = window.__shellyTest;
+  const item = t.overlays.items.find((i) => i.type === 'highlight');
+  const rect = item.rects[0];
+  const payload = t.overlays.bakePayload().filter((p) => p.type === 'highlight');
+  const baked = await t.engine.bakeOverlays(t.state.bytes, payload);
+  const count = await t.engine.countAnnotations(baked, item.pageIndex, 'Highlight');
+  return { rect, pageIndex: item.pageIndex, count, b64: btoa(String.fromCharCode(...new Uint8Array(baked.slice(0, 0)))) , bakedB64: (() => { let s = ''; const u = new Uint8Array(baked); for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); })() };
+});
+check('highlight saves as a /Highlight annotation', hlInfo.count === 1, `count=${hlInfo.count}`);
+
+await page.evaluate(async ({ bakedB64 }) => {
+  const bytes = Uint8Array.from(atob(bakedB64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, null, 'highlighted.pdf');
+}, hlInfo);
+await page.waitForFunction(
+  (pi) => window.__shellyTest.viewer.pages[pi]?.rendered === true,
+  hlInfo.pageIndex
+);
+const hlRendered = await page.evaluate(({ rect, pageIndex }) => {
+  const t = window.__shellyTest;
+  const p = t.viewer.pages[pageIndex];
+  const s = t.viewer.scale;
+  const ratio = p.canvas.width / p.canvas.clientWidth;
+  const cx = Math.round((rect.x + rect.w / 2) * s * ratio);
+  const cy = Math.round((rect.y + rect.h / 2) * s * ratio);
+  const px = p.canvas.getContext('2d').getImageData(cx, cy, 1, 1).data;
+  // yellow-ish tint: strong red+green, weaker blue, not plain white
+  return { px: [...px], ok: px[0] > 180 && px[1] > 150 && px[2] < 210 && !(px[0] > 245 && px[1] > 245 && px[2] > 245) };
+}, hlInfo);
+check('reopened file renders the highlight annotation', hlRendered.ok, `rgb=${hlRendered.px.slice(0, 3)}`);
+await page.screenshot({ path: path.join(outDir, '7-parity.png') });
+
 await browser.close();
 server.close();
 

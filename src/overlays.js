@@ -21,7 +21,7 @@ export class OverlayManager extends EventTarget {
     this.mode = 'select'; // 'select' | 'text' | 'image' | 'highlight' | 'note'
     this.pendingImage = null; // {bytes, format, objectUrl, naturalW, naturalH}
     this.selectedId = null;
-    this.defaults = { size: 16, color: '#d92626', highlight: '#ffe066', note: '#ffd400' };
+    this.defaults = { size: 16, color: '#d92626', bg: false, highlight: '#ffe066', note: '#ffd400' };
 
     viewer.addEventListener('layout', () => this.mountAll());
 
@@ -97,6 +97,7 @@ export class OverlayManager extends EventTarget {
       committedText: '',
       size: this.defaults.size,
       color: this.defaults.color,
+      bg: this.defaults.bg,
     };
     this.items.push(item);
     this.#mount(item);
@@ -210,14 +211,16 @@ export class OverlayManager extends EventTarget {
     this.dispatchEvent(new CustomEvent('selectionchange', { detail: { item: this.items.find((i) => i.id === id) || null } }));
   }
 
-  /** Apply font size / color to the selected text overlay (and future ones). */
-  setTextProps({ size, color }) {
+  /** Apply font size / color / fill to the selected text overlay (and future ones). */
+  setTextProps({ size, color, bg }) {
     if (size) this.defaults.size = size;
     if (color) this.defaults.color = color;
+    if (bg !== undefined) this.defaults.bg = bg;
     const item = this.items.find((i) => i.id === this.selectedId && i.type === 'text');
     if (item) {
       if (size) item.size = size;
       if (color) item.color = color;
+      if (bg !== undefined) item.bg = bg;
       this.#style(item);
       this.#changed();
     }
@@ -371,6 +374,7 @@ export class OverlayManager extends EventTarget {
     if (item.type === 'text') {
       el.style.fontSize = `${item.size * s}px`;
       el.style.color = item.color;
+      el.style.background = item.bg ? '#ffffff' : 'transparent';
     } else if (item.type === 'note') {
       el.style.width = `${NOTE_SIZE * s}px`;
       el.style.height = `${NOTE_SIZE * s}px`;
@@ -519,6 +523,14 @@ export class OverlayManager extends EventTarget {
         if (!it.text.trim()) continue;
         const baselineY = it.y + it.size * TEXT_BASELINE;
         const [x, y] = viewport.convertToPdfPoint(it.x, baselineY);
+        let bg = null;
+        if (it.bg && it.el) {
+          // The DOM box is the fill area; anchor at its bottom-left on screen.
+          const w = it.el.offsetWidth / this.viewer.scale;
+          const h = it.el.offsetHeight / this.viewer.scale;
+          const [bx, by] = viewport.convertToPdfPoint(it.x, it.y + h);
+          bg = { x: bx, y: by, width: w, height: h };
+        }
         out.push({
           type: 'text',
           pageIndex: it.pageIndex,
@@ -528,6 +540,7 @@ export class OverlayManager extends EventTarget {
           size: it.size,
           lineHeight: it.size * TEXT_LINE_HEIGHT,
           color: hexToRgb(it.color),
+          bg,
         });
       } else if (it.type === 'highlight') {
         out.push({

@@ -26,6 +26,52 @@ const MIME = {
 let win = null;
 let docDirty = false;
 let forceClose = false;
+let pendingOpenPaths = []; // PDFs to open once the renderer is ready
+
+function pdfPathsFromArgv(argv) {
+  // Packaged: [exe, file...]; dev: [electron, ".", file...]
+  return argv
+    .slice(1)
+    .filter((a) => a.toLowerCase().endsWith('.pdf') && fs.existsSync(a))
+    .map((a) => path.resolve(a));
+}
+
+async function sendOpenPaths(paths) {
+  if (!paths.length) return;
+  if (!win) {
+    pendingOpenPaths.push(...paths);
+    return;
+  }
+  const files = [];
+  for (const p of paths) {
+    try {
+      files.push({ path: p, name: path.basename(p), data: await fs.promises.readFile(p) });
+    } catch {
+      // unreadable file — skip
+    }
+  }
+  if (files.length) win.webContents.send('open-files', files);
+}
+
+// Second launch (e.g. double-clicking another PDF) routes into this window.
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', (_e, argv) => {
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
+    sendOpenPaths(pdfPathsFromArgv(argv));
+  });
+}
+
+// macOS: Finder hands files over via open-file.
+app.on('open-file', (e, p) => {
+  e.preventDefault();
+  sendOpenPaths([p]);
+});
 
 function createWindow() {
   win = new BrowserWindow({
@@ -83,6 +129,12 @@ function createWindow() {
 
   win.on('closed', () => {
     win = null;
+  });
+
+  win.webContents.on('did-finish-load', () => {
+    const paths = pendingOpenPaths;
+    pendingOpenPaths = [];
+    sendOpenPaths(paths);
   });
 }
 
@@ -157,6 +209,7 @@ app.whenReady().then(() => {
   });
 
   buildMenu();
+  pendingOpenPaths.push(...pdfPathsFromArgv(process.argv));
   createWindow();
 
   app.on('activate', () => {
