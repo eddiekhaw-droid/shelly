@@ -212,6 +212,30 @@ describe('bakeOverlays', () => {
   });
 });
 
+describe('bakeOcrText', () => {
+  it('adds invisible words without altering page structure', async () => {
+    const { bakeOcrText } = await import('../src/pdf-engine.js');
+    const bytes = await bakeOcrText(fixture5, [
+      {
+        pageIndex: 0,
+        words: [
+          { text: 'INVOICE', x: 40, y: 400, width: 90, height: 20 },
+          { text: '8450', x: 140, y: 400, width: 50, height: 20 },
+          { text: '', x: 0, y: 0, width: 10, height: 10 }, // skipped
+        ],
+      },
+    ]);
+    expect(bytes.length).toBeGreaterThan(fixture5.length);
+    expect(await getPageCount(bytes)).toBe(5);
+    expect(await getPageRotation(bytes, 0)).toBe(0);
+  });
+
+  it('returns input bytes untouched with no pages', async () => {
+    const { bakeOcrText } = await import('../src/pdf-engine.js');
+    expect(await bakeOcrText(fixture5, [])).toBe(fixture5);
+  });
+});
+
 describe('applyFormValues', () => {
   async function makeFormFixture() {
     const doc = await PDFDocument.create();

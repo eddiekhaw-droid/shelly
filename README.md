@@ -28,6 +28,12 @@ leave your machine.
 - Extract selected pages to a new PDF
 - Insert/merge all pages from another PDF
 
+**OCR (scanned documents)**
+- The **OCR** button recognizes text on scanned pages (Tesseract, fully offline —
+  nothing leaves your machine). Recognized pages become searchable, selectable,
+  and highlightable, and saving bakes an invisible text layer into the PDF so it
+  is searchable in any reader — like Acrobat's "Recognize Text".
+
 **Annotate & fill**
 - **Highlight** — drag over text to highlight it; saved as a genuine /Highlight
   annotation (selectable/removable in Acrobat), pick the color while the tool is active
@@ -49,7 +55,8 @@ leave your machine.
 
 > Note: like all non-Acrobat-Pro tools, Shelly adds content *on top of* pages.
 > It does not rewrite a PDF's existing typeset text, and password-protected PDFs
-> are not supported.
+> are not supported. OCR ships with the English model; other languages can be
+> added by dropping the matching traineddata into the OCR assets.
 
 ## Run it
 

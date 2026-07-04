@@ -21,6 +21,9 @@ const MIME = {
   '.png': 'image/png',
   '.woff2': 'font/woff2',
   '.map': 'application/json',
+  '.wasm': 'application/wasm',
+  '.gz': 'application/gzip',
+  '.traineddata': 'application/octet-stream',
 };
 
 let win = null;

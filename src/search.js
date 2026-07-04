@@ -35,9 +35,10 @@ export class Searcher {
     this.pages = [];
     for (let i = 0; i < this.viewer.pageCount; i++) {
       const content = await this.viewer.pages[i].proxy.getTextContent();
+      const items = [...content.items, ...(this.viewer.ocrItems?.(i) ?? [])];
       let text = '';
       const runs = [];
-      for (const it of content.items) {
+      for (const it of items) {
         if (!('str' in it)) continue;
         if (it.str) {
           runs.push({ item: it, start: text.length });

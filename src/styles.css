@@ -236,6 +236,20 @@ label.checkbox { display: inline-flex; align-items: center; gap: 3px; cursor: po
 .viewer .page .textLayer { z-index: 2; }
 .viewer .page .annotationLayer { position: absolute; inset: 0; z-index: 3; }
 
+/* invisible-but-selectable words from the OCR pass */
+.ocrLayer { position: absolute; inset: 0; z-index: 2; }
+.ocrLayer span {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0 0;
+  user-select: text;
+  line-height: 1;
+}
+.ocrLayer ::selection { background: rgba(61, 123, 253, 0.35); }
+.viewer.tool-highlight .ocrLayer ::selection { background: rgba(255, 224, 102, 0.55); }
+
 .hlLayer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .hl {
   position: absolute;

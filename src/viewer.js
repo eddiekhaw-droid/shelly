@@ -41,6 +41,7 @@ export class Viewer extends EventTarget {
     }
     // pdf.js takes ownership of (detaches) the buffer, so hand it a copy.
     this.doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+    this.ocrWords = new Map(); // pageIndex → words from the OCR pass
     this.fieldObjects = await this.doc.getFieldObjects().catch(() => null);
     this.linkService = new SimpleLinkService();
     this.linkService.setDocument?.(this.doc, null);
@@ -207,6 +208,7 @@ export class Viewer extends EventTarget {
         console.warn('annotation layer failed on page', i + 1, err);
       }
 
+      this.#buildOcrLayer(i);
     }
   }
 
@@ -285,6 +287,55 @@ export class Viewer extends EventTarget {
     if (!el) return;
     this.root.scrollTop = el.offsetTop + yView - this.root.clientHeight / 3;
     this.#trackCurrentPage();
+  }
+
+  /**
+   * Install OCR results for a page. Words carry a zoom-independent viewRect
+   * (view points) for the selectable span layer, and user-space metrics
+   * (baseline x/y, width, height in PDF points) for search and baking.
+   */
+  setOcrPage(pageIndex, words) {
+    this.ocrWords.set(pageIndex, words);
+    if (this.pages[pageIndex]?.rendered) this.#buildOcrLayer(pageIndex);
+  }
+
+  /** OCR words shaped like pdf.js text items, for the Searcher. */
+  ocrItems(pageIndex) {
+    const words = this.ocrWords?.get(pageIndex);
+    if (!words) return [];
+    return words.map((w) => ({
+      str: w.text,
+      transform: [w.user.height, 0, 0, w.user.height, w.user.x, w.user.y],
+      width: w.user.width,
+      hasEOL: true, // each word is its own run; treat gaps as spaces
+    }));
+  }
+
+  #buildOcrLayer(pageIndex) {
+    const p = this.pages[pageIndex];
+    const words = this.ocrWords?.get(pageIndex);
+    if (!p || !words) return;
+    p.el.querySelector('.ocrLayer')?.remove();
+    const layer = document.createElement('div');
+    layer.className = 'ocrLayer';
+    const measure = document.createElement('canvas').getContext('2d');
+    const s = this.scale;
+    for (const w of words) {
+      const span = document.createElement('span');
+      span.textContent = w.text;
+      const h = w.viewRect.h * s;
+      const fontSize = Math.max(4, h * 0.9);
+      span.style.left = `${w.viewRect.x * s}px`;
+      span.style.top = `${w.viewRect.y * s}px`;
+      span.style.fontSize = `${fontSize}px`;
+      // Stretch the invisible glyphs to the scanned word's width so text
+      // selection (and the highlighter) tracks the pixels underneath.
+      measure.font = `${fontSize}px sans-serif`;
+      const natural = measure.measureText(w.text).width;
+      if (natural > 0) span.style.transform = `scaleX(${(w.viewRect.w * s) / natural})`;
+      layer.appendChild(span);
+    }
+    p.el.insertBefore(layer, p.hlLayer);
   }
 
   /** Has the user typed/clicked anything into form fields since load? */

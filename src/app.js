@@ -1,4 +1,5 @@
 import * as engine from './pdf-engine.js';
+import { recognizeCanvas } from './ocr.js';
 import { Viewer } from './viewer.js';
 import { Thumbnails } from './thumbnails.js';
 import { Searcher } from './search.js';
@@ -78,6 +79,8 @@ class Session {
   constructor(bytes, path, name) {
     this.state = { bytes, path, name, dirty: false, undo: [], redo: [] };
     this.overlayShadow = [];
+    this.ocr = new Map(); // pageIndex → words pending bake into the PDF
+    this.ocrRunning = false;
 
     this.viewerEl = document.createElement('div');
     this.viewerEl.className = 'viewer';
@@ -152,7 +155,10 @@ class Session {
       const order = e.detail.order;
       this.structuralOp(
         (bytes) => engine.reorderPages(bytes, order),
-        () => this.overlays.remapAfterReorder(order)
+        () => {
+          this.overlays.remapAfterReorder(order);
+          this.#remapOcr((i) => order.indexOf(i));
+        }
       );
     });
   }
@@ -167,6 +173,7 @@ class Session {
   async reload({ keepPage = true } = {}) {
     const page = keepPage ? this.viewer.currentPage : 0;
     await this.viewer.load(this.state.bytes);
+    for (const [i, words] of this.ocr) this.viewer.setOcrPage(i, words); // pending OCR
     this.searcher.reset();
     this.overlays.mountAll();
     this.thumbs.build(this.viewer); // not awaited: thumbnails fill in behind
@@ -198,6 +205,16 @@ class Session {
     return sel.length ? sel : [this.viewer.currentPage];
   }
 
+  /** Re-key pending OCR results after a page operation. mapFn: old → new|null. */
+  #remapOcr(mapFn) {
+    const next = new Map();
+    for (const [i, words] of this.ocr) {
+      const to = mapFn(i);
+      if (to != null) next.set(to, words);
+    }
+    this.ocr = next;
+  }
+
   async rotateSelection(delta) {
     const pages = this.targetPages();
     const dims = new Map(
@@ -206,17 +223,28 @@ class Session {
         return [i, { width: v.width, height: v.height }];
       })
     );
+    const clearedOcr = pages.some((i) => this.ocr.has(i));
     await this.structuralOp(
       (bytes) => engine.rotatePages(bytes, pages, delta),
-      () => this.overlays.remapAfterRotate(pages, delta, dims)
+      () => {
+        this.overlays.remapAfterRotate(pages, delta, dims);
+        // OCR word positions are tied to the old orientation.
+        this.#remapOcr((i) => (pages.includes(i) ? null : i));
+      }
     );
+    if (clearedOcr) toast('Rotating cleared text recognition on the rotated page(s) — run OCR again.');
   }
 
   async deleteSelection() {
     const pages = this.targetPages();
     await this.structuralOp(
       (bytes) => engine.deletePages(bytes, pages),
-      () => this.overlays.remapAfterDelete(pages)
+      () => {
+        this.overlays.remapAfterDelete(pages);
+        this.#remapOcr((i) =>
+          pages.includes(i) ? null : i - pages.filter((d) => d < i).length
+        );
+      }
     );
   }
 
@@ -252,13 +280,85 @@ class Session {
     const count = await engine.getPageCount(other);
     await this.structuralOp(
       (bytes) => engine.insertPdf(bytes, other, at),
-      () => this.overlays.remapAfterInsert(at, count)
+      () => {
+        this.overlays.remapAfterInsert(at, count);
+        this.#remapOcr((i) => (i >= at ? i + count : i));
+      }
     );
     toast(`Inserted ${count} page${count === 1 ? '' : 's'} from ${file.name}.`);
   }
 
+  /**
+   * Run OCR over pages that have no real text layer (scanned pages) and make
+   * them searchable/selectable. Results are baked into the PDF as invisible
+   * text on the next save.
+   */
+  async runOcr() {
+    if (this.ocrRunning) return;
+    this.ocrRunning = true;
+    try {
+      const targets = [];
+      for (let i = 0; i < this.viewer.pageCount; i++) {
+        if (this.ocr.has(i)) continue; // already recognized
+        const tc = await this.viewer.pages[i].proxy.getTextContent();
+        const chars = tc.items.reduce((n, it) => n + (it.str ? it.str.trim().length : 0), 0);
+        if (chars < 10) targets.push(i);
+      }
+      if (!targets.length) {
+        toast('No scanned pages found — every page already has selectable text.');
+        return;
+      }
+      for (let k = 0; k < targets.length; k++) {
+        const i = targets[k];
+        toast(`Recognizing text… page ${k + 1} of ${targets.length}`);
+        const proxy = this.viewer.pages[i].proxy;
+        const base = proxy.getViewport({ scale: 1 });
+        // ~300 DPI, capped so huge pages don't blow canvas limits
+        const S = Math.min(300 / 72, 4000 / Math.max(base.width, base.height));
+        const viewport = proxy.getViewport({ scale: S });
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.floor(viewport.width);
+        canvas.height = Math.floor(viewport.height);
+        await proxy.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        const raw = await recognizeCanvas(canvas);
+
+        const words = [];
+        for (const w of raw) {
+          if (w.confidence < 40) continue;
+          const { x0, y0, x1, y1 } = w.bbox;
+          const [ux, uy] = viewport.convertToPdfPoint(x0, y1); // baseline-left
+          words.push({
+            text: w.text,
+            viewRect: { x: x0 / S, y: y0 / S, w: (x1 - x0) / S, h: (y1 - y0) / S },
+            user: { x: ux, y: uy, width: (x1 - x0) / S, height: (y1 - y0) / S },
+          });
+        }
+        this.viewer.setOcrPage(i, words);
+        this.ocr.set(i, words);
+      }
+      this.searcher.reset(); // pick up the new words
+      this.markDirty(true);
+      toast(
+        `Text recognition done: ${targets.length} page${targets.length === 1 ? '' : 's'}. Saving will make the PDF searchable everywhere.`
+      );
+    } catch (err) {
+      toast(`Text recognition failed: ${err.message}`, true);
+    } finally {
+      this.ocrRunning = false;
+    }
+  }
+
   async buildSaveBytes() {
     let data = this.state.bytes;
+    if (this.ocr.size) {
+      data = await engine.bakeOcrText(
+        data,
+        [...this.ocr.entries()].map(([pageIndex, words]) => ({
+          pageIndex,
+          words: words.map((w) => ({ text: w.text, ...w.user })),
+        }))
+      );
+    }
     if (this.viewer.hasFormEdits) {
       data = await engine.applyFormValues(data, await this.viewer.collectFormValues());
     }
@@ -302,10 +402,11 @@ class Session {
   async adoptSaved(data) {
     // Overlays and form values are now part of the document; drop the
     // editable copies and re-render from the saved bytes.
-    const needReload = !this.overlays.isEmpty || this.viewer.hasFormEdits;
+    const needReload = !this.overlays.isEmpty || this.viewer.hasFormEdits || this.ocr.size > 0;
     this.state.bytes = data;
     if (needReload) {
       this.overlays.clear();
+      this.ocr.clear(); // the invisible text layer is in the document now
       await this.reload();
     }
     this.state.undo = [];
@@ -436,7 +537,7 @@ function syncSessionUi() {
 
 function refreshUi() {
   const loaded = !!current;
-  for (const id of ['btn-save', 'btn-save-as', 'btn-print', 'pg-insert']) $(id).disabled = !loaded;
+  for (const id of ['btn-save', 'btn-save-as', 'btn-print', 'pg-insert', 'btn-ocr']) $(id).disabled = !loaded;
   $('page-num').disabled = !loaded;
   $('btn-undo').disabled = !current || !current.state.undo.length;
   $('btn-redo').disabled = !current || !current.state.redo.length;
@@ -625,6 +726,7 @@ $('btn-print').addEventListener('click', print);
 $('btn-undo').addEventListener('click', () => current?.undo());
 $('btn-redo').addEventListener('click', () => current?.redo());
 $('btn-sidebar').addEventListener('click', () => $('sidebar').classList.toggle('hidden'));
+$('btn-ocr').addEventListener('click', () => current?.runOcr());
 
 $('btn-prev').addEventListener('click', () => current?.viewer.goToPage(current.viewer.currentPage - 1));
 $('btn-next').addEventListener('click', () => current?.viewer.goToPage(current.viewer.currentPage + 1));
@@ -840,6 +942,9 @@ window.__shellyTest = {
   },
   get thumbs() {
     return current?.thumbs;
+  },
+  get session() {
+    return current;
   },
   sessionCount: () => sessions.length,
   activate: (i) => activateSession(sessions[i]),

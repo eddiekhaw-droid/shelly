@@ -237,6 +237,38 @@ function addTextAnnotation(doc, ov) {
 }
 
 /**
+ * Bake OCR results into the document as an invisible (opacity 0) text layer,
+ * like Acrobat's "Recognize Text": the page still shows the scan, but the
+ * text underneath is searchable and selectable in any reader.
+ *
+ * pages: [{ pageIndex, words: [{ text, x, y, width, height }] }] with (x, y)
+ * the word's baseline-left in PDF user space.
+ */
+export async function bakeOcrText(bytes, pages) {
+  if (!pages.length) return bytes;
+  const doc = await load(bytes);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (const pg of pages) {
+    const page = doc.getPage(pg.pageIndex);
+    const rotate = degrees(page.getRotation().angle);
+    for (const w of pg.words) {
+      const text = w.text.trim();
+      if (!text) continue;
+      let size = Math.max(1, w.height * 0.9);
+      try {
+        // Shrink to the box width so the selectable region matches the scan.
+        const natural = font.widthOfTextAtSize(text, size);
+        if (natural > w.width && natural > 0) size *= w.width / natural;
+        page.drawText(text, { x: w.x, y: w.y, size, font, opacity: 0, rotate });
+      } catch {
+        // characters outside the font's encoding — skip this word
+      }
+    }
+  }
+  return doc.save();
+}
+
+/**
  * Write user-entered form values into the document's AcroForm fields.
  * values: [{ name, value }] where value is a string (text/choice fields),
  * boolean (checkboxes) or the selected option's export value (radio groups).

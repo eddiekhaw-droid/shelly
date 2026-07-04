@@ -15,7 +15,14 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = process.env.SMOKE_OUT || path.join(root, 'scripts', 'out');
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript', '.css': 'text/css' };
+const MIME = {
+  '.html': 'text/html',
+  '.js': 'text/javascript',
+  '.mjs': 'text/javascript',
+  '.css': 'text/css',
+  '.wasm': 'application/wasm',
+  '.gz': 'application/gzip',
+};
 
 async function makeFixture() {
   const doc = await PDFDocument.create();
@@ -402,6 +409,84 @@ const hlRendered = await page.evaluate(({ rect, pageIndex }) => {
 }, hlInfo);
 check('reopened file renders the highlight annotation', hlRendered.ok, `rgb=${hlRendered.px.slice(0, 3)}`);
 await page.screenshot({ path: path.join(outDir, '7-parity.png') });
+
+// ---------------------------------------------------------------------------
+// OCR: scanned page → recognize → search → save → searchable everywhere
+// ---------------------------------------------------------------------------
+
+// Fake a scan: draw text onto a canvas and wrap the PNG in an image-only PDF.
+const scanPngB64 = await page.evaluate(() => {
+  const c = document.createElement('canvas');
+  c.width = 1275;
+  c.height = 1650;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.fillStyle = '#111';
+  ctx.font = 'bold 64px Arial';
+  ctx.fillText('SCANNED INVOICE', 120, 260);
+  ctx.font = '48px Arial';
+  ctx.fillText('Total amount 8450 dollars', 120, 420);
+  ctx.fillText('Payment due in thirty days', 120, 540);
+  return c.toDataURL('image/png').split(',')[1];
+});
+const scanDoc = await PDFDocument.create();
+const scanImg = await scanDoc.embedPng(Buffer.from(scanPngB64, 'base64'));
+scanDoc.addPage([612, 792]).drawImage(scanImg, { x: 0, y: 0, width: 612, height: 792 });
+const scanPdf = await scanDoc.save();
+
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, null, 'scan.pdf');
+}, Buffer.from(scanPdf).toString('base64'));
+await page.waitForFunction(() => window.__shellyTest.viewer?.pages[0]?.rendered === true);
+
+// before OCR: the page has no searchable text
+const preOcr = await page.evaluate(async () => {
+  const tc = await window.__shellyTest.viewer.pages[0].proxy.getTextContent();
+  return tc.items.length;
+});
+check('scanned page starts with no text layer', preOcr === 0, `items=${preOcr}`);
+
+await page.click('#btn-ocr');
+await page.waitForFunction(() => window.__shellyTest.session.ocr.size > 0, null, { timeout: 180000 });
+const ocrWordCount = await page.evaluate(() => window.__shellyTest.session.ocr.get(0)?.length ?? 0);
+check('OCR recognized words on the scanned page', ocrWordCount >= 8, `${ocrWordCount} words`);
+
+const ocrSpans = await page.locator('.viewer.active .ocrLayer span').count();
+check('OCR words become selectable spans', ocrSpans >= 8, `${ocrSpans} spans`);
+
+await page.click('#btn-find');
+await page.fill('#find-input', '8450 dollars');
+await page.waitForFunction(() => document.querySelector('#find-count').textContent.trim() !== '');
+const ocrSearch = (await page.textContent('#find-count')).trim();
+check('search finds text on the scanned page', ocrSearch === '1 / 1', ocrSearch);
+await page.screenshot({ path: path.join(outDir, '8-ocr.png') });
+await page.click('#find-close');
+
+// save → invisible text is baked in; a fresh load of the saved bytes must be
+// natively searchable (what Acrobat and other readers will see)
+const savedB64 = await page.evaluate(async () => {
+  const baked = await window.__shellyTest.session.buildSaveBytes();
+  let s = '';
+  const u = new Uint8Array(baked);
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  return btoa(s);
+});
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, null, 'scan-searchable.pdf');
+}, savedB64);
+await page.waitForFunction(() => window.__shellyTest.viewer?.pages[0]?.rendered === true);
+const nativeText = await page.evaluate(async () => {
+  const tc = await window.__shellyTest.viewer.pages[0].proxy.getTextContent();
+  return tc.items.map((i) => i.str).join(' ');
+});
+check(
+  'saved PDF carries a real invisible text layer',
+  /8450/.test(nativeText) && /INVOICE/i.test(nativeText),
+  nativeText.slice(0, 60)
+);
 
 await browser.close();
 server.close();

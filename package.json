@@ -7,14 +7,16 @@
   "license": "MIT",
   "main": "electron/main.cjs",
   "scripts": {
-    "build": "vite build",
+    "build": "node scripts/copy-ocr-assets.mjs && vite build",
     "start": "npm run build && electron .",
     "test": "vitest run",
     "dist": "npm run build && electron-builder"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^5.0.0"
+    "pdfjs-dist": "^5.0.0",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.52.0",
