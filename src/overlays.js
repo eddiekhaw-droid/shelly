@@ -9,6 +9,7 @@
 // baseline of a DOM line box sits roughly at (LH-1)/2 + ascent from the top.
 const TEXT_LINE_HEIGHT = 1.25;
 const TEXT_BASELINE = (TEXT_LINE_HEIGHT - 1) / 2 + 0.75;
+const NOTE_SIZE = 20; // sticky-note icon, in view points
 
 let nextId = 1;
 
@@ -17,10 +18,10 @@ export class OverlayManager extends EventTarget {
     super();
     this.viewer = viewer;
     this.items = []; // {id,type,pageIndex,x,y,...} — see below
-    this.mode = 'select'; // 'select' | 'text' | 'image'
+    this.mode = 'select'; // 'select' | 'text' | 'image' | 'highlight' | 'note'
     this.pendingImage = null; // {bytes, format, objectUrl, naturalW, naturalH}
     this.selectedId = null;
-    this.defaults = { size: 16, color: '#d92626' };
+    this.defaults = { size: 16, color: '#d92626', highlight: '#ffe066', note: '#ffd400' };
 
     viewer.addEventListener('layout', () => this.mountAll());
 
@@ -29,14 +30,23 @@ export class OverlayManager extends EventTarget {
       this.select(null);
       const pageEl = e.target.closest('.page');
       if (!pageEl || this.mode === 'select') return;
+      // Highlight mode uses native text selection; don't swallow the drag.
+      if (this.mode === 'highlight') return;
       const pageIndex = Number(pageEl.dataset.page);
       const rect = pageEl.getBoundingClientRect();
       const scale = this.viewer.scale;
       const x = (e.clientX - rect.left) / scale;
       const y = (e.clientY - rect.top) / scale;
       if (this.mode === 'text') this.#placeText(pageIndex, x, y);
+      else if (this.mode === 'note') this.#placeNote(pageIndex, x, y);
       else if (this.mode === 'image' && this.pendingImage) this.#placeImage(pageIndex, x, y);
       e.preventDefault();
+    });
+
+    viewer.root.addEventListener('pointerup', () => {
+      if (this.mode !== 'highlight') return;
+      // Let the browser finalize the selection first.
+      setTimeout(() => this.#highlightFromSelection(), 0);
     });
 
     document.addEventListener('keydown', (e) => {
@@ -57,8 +67,9 @@ export class OverlayManager extends EventTarget {
   setMode(mode) {
     this.mode = mode;
     if (mode !== 'image') this.pendingImage = null;
-    this.viewer.root.classList.toggle('tool-text', mode === 'text');
-    this.viewer.root.classList.toggle('tool-image', mode === 'image');
+    for (const m of ['text', 'image', 'highlight', 'note']) {
+      this.viewer.root.classList.toggle(`tool-${m}`, mode === m);
+    }
   }
 
   setPendingImage(bytes, format) {
@@ -95,6 +106,80 @@ export class OverlayManager extends EventTarget {
     // committed on blur.
   }
 
+  #placeNote(pageIndex, x, y) {
+    const item = {
+      id: nextId++,
+      type: 'note',
+      pageIndex,
+      x: x - NOTE_SIZE / 2,
+      y: y - NOTE_SIZE / 2,
+      text: '',
+      committedText: '',
+      color: this.defaults.note,
+    };
+    this.items.push(item);
+    this.#mount(item);
+    this.select(item.id);
+    item.editEl?.focus();
+  }
+
+  /** Turn the current text selection into highlight overlays (one per page). */
+  #highlightFromSelection() {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return;
+    const scale = this.viewer.scale;
+    const perPage = new Map();
+    for (let r = 0; r < sel.rangeCount; r++) {
+      for (const rect of sel.getRangeAt(r).getClientRects()) {
+        if (rect.width < 1 || rect.height < 2) continue;
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        for (let p = 0; p < this.viewer.pages.length; p++) {
+          const pr = this.viewer.pages[p].el.getBoundingClientRect();
+          if (cx < pr.left || cx > pr.right || cy < pr.top || cy > pr.bottom) continue;
+          const box = {
+            x: (rect.left - pr.left) / scale,
+            y: (rect.top - pr.top) / scale,
+            w: rect.width / scale,
+            h: rect.height / scale,
+          };
+          if (!perPage.has(p)) perPage.set(p, []);
+          const list = perPage.get(p);
+          // Selections often report duplicate/near-duplicate boxes; keep one.
+          if (
+            !list.some(
+              (b) =>
+                Math.abs(b.x - box.x) < 1 &&
+                Math.abs(b.y - box.y) < 1 &&
+                Math.abs(b.w - box.w) < 1 &&
+                Math.abs(b.h - box.h) < 1
+            )
+          ) {
+            list.push(box);
+          }
+          break;
+        }
+      }
+    }
+    sel.removeAllRanges();
+    for (const [pageIndex, rects] of perPage) {
+      const item = { id: nextId++, type: 'highlight', pageIndex, rects, color: this.defaults.highlight };
+      this.items.push(item);
+      this.#mount(item);
+      this.#changed();
+    }
+  }
+
+  setHighlightColor(color) {
+    this.defaults.highlight = color;
+    const item = this.items.find((i) => i.id === this.selectedId && i.type === 'highlight');
+    if (item) {
+      item.color = color;
+      this.#style(item);
+      this.#changed();
+    }
+  }
+
   #placeImage(pageIndex, x, y) {
     const { bytes, format, objectUrl, naturalW, naturalH } = this.pendingImage;
     const base = this.viewer.baseViewport(pageIndex);
@@ -114,8 +199,9 @@ export class OverlayManager extends EventTarget {
     this.items = this.items.filter((it) => it !== item);
     item.el?.remove();
     if (this.selectedId === id) this.selectedId = null;
-    // Discarding a never-committed empty text box is not an edit.
-    if (item.type !== 'text' || item.text.trim()) this.#changed();
+    // Discarding a never-committed empty text box or note is not an edit.
+    const emptyDraft = (item.type === 'text' || item.type === 'note') && !item.text.trim();
+    if (!emptyDraft) this.#changed();
   }
 
   select(id) {
@@ -197,6 +283,36 @@ export class OverlayManager extends EventTarget {
       });
       el.appendChild(edit);
       item.editEl = edit;
+    } else if (item.type === 'note') {
+      const icon = document.createElement('div');
+      icon.className = 'ov-note-icon';
+      icon.textContent = '💬';
+      el.appendChild(icon);
+      const pop = document.createElement('textarea');
+      pop.className = 'ov-note-pop';
+      pop.placeholder = 'Type a note…';
+      pop.value = item.text;
+      pop.addEventListener('pointerdown', (e) => e.stopPropagation());
+      pop.addEventListener('input', () => {
+        item.text = pop.value;
+        this.#changed(false);
+      });
+      pop.addEventListener('blur', () => {
+        if (!item.text.trim()) {
+          this.remove(item.id);
+        } else if (item.text !== item.committedText) {
+          item.committedText = item.text;
+          this.#changed();
+        }
+      });
+      el.appendChild(pop);
+      item.editEl = pop;
+    } else if (item.type === 'highlight') {
+      for (const _ of item.rects) {
+        const r = document.createElement('div');
+        r.className = 'ov-hl-rect';
+        el.appendChild(r);
+      }
     } else {
       const img = document.createElement('img');
       img.src = item.objectUrl;
@@ -228,11 +344,39 @@ export class OverlayManager extends EventTarget {
   #style(item) {
     const s = this.viewer.scale;
     const el = item.el;
+    if (item.type === 'highlight') {
+      // Position at the rects' bounding box; children hold the actual rects.
+      const bx = Math.min(...item.rects.map((r) => r.x));
+      const by = Math.min(...item.rects.map((r) => r.y));
+      const bw = Math.max(...item.rects.map((r) => r.x + r.w)) - bx;
+      const bh = Math.max(...item.rects.map((r) => r.y + r.h)) - by;
+      el.style.left = `${bx * s}px`;
+      el.style.top = `${by * s}px`;
+      el.style.width = `${bw * s}px`;
+      el.style.height = `${bh * s}px`;
+      const rectEls = el.querySelectorAll('.ov-hl-rect');
+      item.rects.forEach((r, i) => {
+        const div = rectEls[i];
+        if (!div) return;
+        div.style.left = `${(r.x - bx) * s}px`;
+        div.style.top = `${(r.y - by) * s}px`;
+        div.style.width = `${r.w * s}px`;
+        div.style.height = `${r.h * s}px`;
+        div.style.background = item.color;
+      });
+      return;
+    }
     el.style.left = `${item.x * s}px`;
     el.style.top = `${item.y * s}px`;
     if (item.type === 'text') {
       el.style.fontSize = `${item.size * s}px`;
       el.style.color = item.color;
+    } else if (item.type === 'note') {
+      el.style.width = `${NOTE_SIZE * s}px`;
+      el.style.height = `${NOTE_SIZE * s}px`;
+      el.style.fontSize = `${NOTE_SIZE * 0.65 * s}px`;
+      const icon = el.querySelector('.ov-note-icon');
+      if (icon) icon.style.background = item.color;
     } else {
       el.style.width = `${item.w * s}px`;
       el.style.height = `${item.h * s}px`;
@@ -242,7 +386,9 @@ export class OverlayManager extends EventTarget {
   #wireDrag(item, el) {
     el.addEventListener('pointerdown', (e) => {
       if (e.target.classList.contains('ov-resize')) return;
+      if (e.target.tagName === 'TEXTAREA') return;
       this.select(item.id);
+      if (item.type === 'highlight') return; // selectable (for delete), not movable
       // Text overlays: while the text is focused for editing, leave pointer
       // events to the caret/selection instead of dragging.
       if (item.type === 'text' && document.activeElement === item.editEl) return;
@@ -265,7 +411,7 @@ export class OverlayManager extends EventTarget {
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
         if (moved) this.#changed();
-        else if (item.type === 'text') item.editEl?.focus();
+        else if (item.type === 'text' || item.type === 'note') item.editEl?.focus();
       };
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp);
@@ -330,22 +476,36 @@ export class OverlayManager extends EventTarget {
    */
   remapAfterRotate(pageIndices, delta, dims) {
     const d = ((delta % 360) + 360) % 360;
+    if (d === 0) return;
+    const mapBox = (b, W, H) => {
+      if (d === 90) return { x: H - b.y - b.h, y: b.x, w: b.h, h: b.w };
+      if (d === 270) return { x: b.y, y: W - b.x - b.w, w: b.h, h: b.w };
+      return { x: W - b.x - b.w, y: H - b.y - b.h, w: b.w, h: b.h }; // 180
+    };
     for (const it of this.items) {
       if (!pageIndices.includes(it.pageIndex)) continue;
       const { width: W, height: H } = dims.get(it.pageIndex);
-      const bw = it.type === 'image' ? it.w : (it.el?.offsetWidth ?? 0) / this.viewer.scale;
-      const bh = it.type === 'image' ? it.h : (it.el?.offsetHeight ?? 0) / this.viewer.scale;
-      let { x, y } = it;
-      if (d === 90) {
-        [it.x, it.y] = [H - y - bh, x];
-      } else if (d === 270) {
-        [it.x, it.y] = [y, W - x - bw];
-      } else if (d === 180) {
-        [it.x, it.y] = [W - x - bw, H - y - bh];
+      if (it.type === 'highlight') {
+        it.rects = it.rects.map((r) => mapBox(r, W, H));
+        continue;
       }
-      if (it.type === 'image' && (d === 90 || d === 270)) {
-        // The box itself stays axis-aligned; nothing else to change because
-        // width/height are stored in view points and follow the box.
+      let bw;
+      let bh;
+      if (it.type === 'image') {
+        bw = it.w;
+        bh = it.h;
+      } else if (it.type === 'note') {
+        bw = bh = NOTE_SIZE;
+      } else {
+        bw = (it.el?.offsetWidth ?? 0) / this.viewer.scale;
+        bh = (it.el?.offsetHeight ?? 0) / this.viewer.scale;
+      }
+      const mapped = mapBox({ x: it.x, y: it.y, w: bw, h: bh }, W, H);
+      it.x = mapped.x;
+      it.y = mapped.y;
+      if (it.type === 'image') {
+        it.w = mapped.w;
+        it.h = mapped.h;
       }
     }
   }
@@ -367,6 +527,28 @@ export class OverlayManager extends EventTarget {
           text: it.text.replace(/\r/g, ''),
           size: it.size,
           lineHeight: it.size * TEXT_LINE_HEIGHT,
+          color: hexToRgb(it.color),
+        });
+      } else if (it.type === 'highlight') {
+        out.push({
+          type: 'highlight',
+          pageIndex: it.pageIndex,
+          rects: it.rects.map((r) => {
+            const [x, y] = viewport.convertToPdfPoint(r.x, r.y + r.h);
+            return { x, y, width: r.w, height: r.h };
+          }),
+          color: hexToRgb(it.color),
+        });
+      } else if (it.type === 'note') {
+        if (!it.text.trim()) continue;
+        const [x, y] = viewport.convertToPdfPoint(it.x, it.y + NOTE_SIZE);
+        out.push({
+          type: 'note',
+          pageIndex: it.pageIndex,
+          x,
+          y,
+          size: NOTE_SIZE,
+          text: it.text,
           color: hexToRgb(it.color),
         });
       } else {

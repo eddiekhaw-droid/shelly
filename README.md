@@ -23,6 +23,15 @@ leave your machine.
 - Extract selected pages to a new PDF
 - Insert/merge all pages from another PDF
 
+**Annotate & fill**
+- **Highlight** — drag over text to highlight it (drawn with Multiply blending so text
+  stays legible); pick the color while the tool is active
+- **+ Note** — sticky notes, saved as genuine PDF `/Text` annotations that Acrobat and
+  other readers show as comments
+- **Form filling** — PDFs with AcroForm fields (text, checkbox, radio, dropdown) are
+  fillable right in the viewer; values are written into the file on save
+- **Sign** — draw a signature with the mouse, then stamp it on any page
+
 **Add content**
 - **+ Text** — click anywhere on a page to add a text box; set font size and color;
   drag to reposition; edits are baked into the PDF when you save
@@ -75,7 +84,8 @@ src/app.js            State, wiring, undo/redo, save flow. Falls back to file
                       input + download when run in a plain browser.
 src/pdf-engine.js     All PDF mutation (pdf-lib): rotate/delete/reorder/extract/
                       insert/bake — pure bytes-in/bytes-out, unit-tested
-src/viewer.js         pdf.js rendering: lazy page render, zoom, text layer
+src/viewer.js         pdf.js rendering: lazy page render, zoom, text layer,
+                      annotation layer (interactive forms, links, notes)
 src/thumbnails.js     Sidebar: selection, drag-to-reorder
 src/search.js         Find bar: match location + highlight painting
 src/overlays.js       Text/image overlay objects and coordinate mapping

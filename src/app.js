@@ -198,7 +198,14 @@ async function openPdf() {
 }
 
 async function buildSaveBytes() {
-  return overlays.isEmpty ? state.bytes : engine.bakeOverlays(state.bytes, overlays.bakePayload());
+  let data = state.bytes;
+  if (viewer.hasFormEdits) {
+    data = await engine.applyFormValues(data, await viewer.collectFormValues());
+  }
+  if (!overlays.isEmpty) {
+    data = await engine.bakeOverlays(data, overlays.bakePayload());
+  }
+  return data;
 }
 
 async function save() {
@@ -235,9 +242,11 @@ async function saveAs() {
 }
 
 async function adoptSaved(data) {
-  // Overlays are now part of the document; drop the editable copies.
+  // Overlays and form values are now part of the document; drop the editable
+  // copies and re-render from the saved bytes.
+  const needReload = !overlays.isEmpty || viewer.hasFormEdits;
   state.bytes = data;
-  if (!overlays.isEmpty) {
+  if (needReload) {
     overlays.clear();
     await reload();
   }
@@ -348,12 +357,15 @@ function setTool(mode) {
   overlays.setMode(mode);
   for (const [id, m] of [
     ['tool-select', 'select'],
+    ['tool-highlight', 'highlight'],
     ['tool-text', 'text'],
+    ['tool-note', 'note'],
     ['tool-image', 'image'],
   ]) {
     $(id).classList.toggle('active', m === mode);
   }
   $('text-props').classList.toggle('visible', mode === 'text');
+  $('hl-props').classList.toggle('visible', mode === 'highlight');
 }
 
 async function chooseImageTool() {
@@ -374,6 +386,87 @@ async function chooseImageTool() {
     setTool('select');
   }
 }
+
+// ---- signature pad ----
+
+const signDialog = $('sign-dialog');
+const signCanvas = $('sign-canvas');
+const signCtx = signCanvas.getContext('2d');
+let signInk = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity, any: false };
+
+function signClear() {
+  signCtx.clearRect(0, 0, signCanvas.width, signCanvas.height);
+  signInk = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity, any: false };
+}
+
+function signPoint(e) {
+  const r = signCanvas.getBoundingClientRect();
+  return [
+    ((e.clientX - r.left) / r.width) * signCanvas.width,
+    ((e.clientY - r.top) / r.height) * signCanvas.height,
+  ];
+}
+
+signCanvas.addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  signCanvas.setPointerCapture(e.pointerId);
+  signCtx.strokeStyle = $('sign-color').value;
+  signCtx.lineWidth = 4;
+  signCtx.lineCap = 'round';
+  signCtx.lineJoin = 'round';
+  let [px, py] = signPoint(e);
+  const mark = (x, y) => {
+    signInk.minX = Math.min(signInk.minX, x);
+    signInk.minY = Math.min(signInk.minY, y);
+    signInk.maxX = Math.max(signInk.maxX, x);
+    signInk.maxY = Math.max(signInk.maxY, y);
+    signInk.any = true;
+  };
+  mark(px, py);
+  const onMove = (ev) => {
+    const [x, y] = signPoint(ev);
+    signCtx.beginPath();
+    signCtx.moveTo(px, py);
+    signCtx.lineTo(x, y);
+    signCtx.stroke();
+    mark(x, y);
+    [px, py] = [x, y];
+  };
+  const onUp = () => {
+    signCanvas.removeEventListener('pointermove', onMove);
+    signCanvas.removeEventListener('pointerup', onUp);
+  };
+  signCanvas.addEventListener('pointermove', onMove);
+  signCanvas.addEventListener('pointerup', onUp);
+});
+
+$('tool-sign').addEventListener('click', () => {
+  if (!state.bytes) return;
+  signClear();
+  signDialog.showModal();
+});
+$('sign-clear').addEventListener('click', signClear);
+$('sign-cancel').addEventListener('click', () => signDialog.close());
+$('sign-use').addEventListener('click', async () => {
+  if (!signInk.any) {
+    signDialog.close();
+    return;
+  }
+  const pad = 12;
+  const x = Math.max(0, signInk.minX - pad);
+  const y = Math.max(0, signInk.minY - pad);
+  const w = Math.min(signCanvas.width, signInk.maxX + pad) - x;
+  const h = Math.min(signCanvas.height, signInk.maxY + pad) - y;
+  const crop = document.createElement('canvas');
+  crop.width = w;
+  crop.height = h;
+  crop.getContext('2d').drawImage(signCanvas, x, y, w, h, 0, 0, w, h);
+  const blob = await new Promise((resolve) => crop.toBlob(resolve, 'image/png'));
+  await overlays.setPendingImage(new Uint8Array(await blob.arrayBuffer()), 'png');
+  signDialog.close();
+  setTool('image');
+  toast('Click a page to place your signature.');
+});
 
 // ---------------------------------------------------------------------------
 // Wiring
@@ -412,8 +505,11 @@ $('zoom-select').addEventListener('change', async (e) => {
 });
 
 $('tool-select').addEventListener('click', () => setTool('select'));
+$('tool-highlight').addEventListener('click', () => setTool('highlight'));
 $('tool-text').addEventListener('click', () => setTool('text'));
+$('tool-note').addEventListener('click', () => setTool('note'));
 $('tool-image').addEventListener('click', chooseImageTool);
+$('hl-color').addEventListener('input', (e) => overlays.setHighlightColor(e.target.value));
 $('text-size').addEventListener('change', (e) =>
   overlays.setTextProps({ size: Math.max(6, Math.min(96, Number(e.target.value) || 16)) })
 );
@@ -445,6 +541,8 @@ overlays.addEventListener('selectionchange', (e) => {
     $('text-props').classList.add('visible');
   }
 });
+
+viewer.addEventListener('formchange', () => setDirty(true));
 
 viewer.addEventListener('pagechange', (e) => {
   $('page-num').value = e.detail.pageIndex + 1;

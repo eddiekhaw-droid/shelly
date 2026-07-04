@@ -178,6 +178,112 @@ await page.waitForFunction(
 );
 check('zoom in enlarges pages', true);
 
+// ---------------------------------------------------------------------------
+// Part 3 features: highlight, sticky note, signature, form filling
+// ---------------------------------------------------------------------------
+
+// fresh document so coordinates are predictable
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, '/tmp/fixture.pdf', 'fixture.pdf');
+}, Buffer.from(fixture).toString('base64'));
+await page.waitForFunction(() => {
+  const spans = document.querySelectorAll('#viewer .page .textLayer span');
+  return spans.length > 0;
+});
+
+// --- highlight: drag across the body text on page 1 ---
+await page.click('#tool-highlight');
+const spanBox = await page.evaluate(() => {
+  const span = document.querySelector('#viewer .page .textLayer span');
+  const r = span.getBoundingClientRect();
+  return { x: r.x, y: r.y, w: r.width, h: r.height };
+});
+await page.mouse.move(spanBox.x + 2, spanBox.y + spanBox.h / 2);
+await page.mouse.down();
+await page.mouse.move(spanBox.x + spanBox.w - 2, spanBox.y + spanBox.h / 2, { steps: 8 });
+await page.mouse.up();
+await page.waitForFunction(() =>
+  window.__shellyTest.overlays.items.some((i) => i.type === 'highlight')
+);
+const hlOk = await page.evaluate(async () => {
+  const t = window.__shellyTest;
+  const payload = t.overlays.bakePayload();
+  const hl = payload.find((p) => p.type === 'highlight');
+  if (!hl || !hl.rects.length) return false;
+  const baked = await t.engine.bakeOverlays(t.state.bytes, payload);
+  return baked.length > t.state.bytes.length;
+});
+check('highlight created from text selection and bakes', hlOk);
+
+// --- sticky note: place, type, bake as a real /Text annotation ---
+await page.click('#tool-note');
+await page.click('#viewer .page', { position: { x: 250, y: 400 } });
+await page.waitForSelector('.overlay.ov-note textarea');
+await page.keyboard.type('Please double-check this section');
+await page.click('#status-file'); // blur commits
+const noteCount = await page.evaluate(async () => {
+  const t = window.__shellyTest;
+  const baked = await t.engine.bakeOverlays(t.state.bytes, t.overlays.bakePayload());
+  return t.engine.countTextAnnotations(baked, 0);
+});
+check('sticky note bakes as a /Text annotation', noteCount === 1, `count=${noteCount}`);
+
+// --- signature: draw in the dialog, place on the page ---
+await page.click('#tool-sign');
+await page.waitForSelector('#sign-dialog[open]');
+const sc = await page.evaluate(() => {
+  const r = document.getElementById('sign-canvas').getBoundingClientRect();
+  return { x: r.x, y: r.y, w: r.width, h: r.height };
+});
+await page.mouse.move(sc.x + sc.w * 0.2, sc.y + sc.h * 0.6);
+await page.mouse.down();
+await page.mouse.move(sc.x + sc.w * 0.4, sc.y + sc.h * 0.3, { steps: 10 });
+await page.mouse.move(sc.x + sc.w * 0.6, sc.y + sc.h * 0.7, { steps: 10 });
+await page.mouse.move(sc.x + sc.w * 0.8, sc.y + sc.h * 0.4, { steps: 10 });
+await page.mouse.up();
+await page.click('#sign-use');
+await page.waitForFunction(() => !document.getElementById('sign-dialog').open);
+// page 2: page 1 has the sticky note's popup covering part of it
+await page.click('#viewer .page[data-page="1"]', { position: { x: 300, y: 300 } });
+await page.waitForFunction(() =>
+  window.__shellyTest.overlays.items.some((i) => i.type === 'image')
+);
+check('signature drawn and placed as an image overlay', true);
+await page.screenshot({ path: path.join(outDir, '4-annotate.png') });
+
+// --- form filling ---
+async function makeFormPdf() {
+  const doc = await PDFDocument.create();
+  const pg = doc.addPage([500, 400]);
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  pg.drawText('Name:', { x: 30, y: 330, size: 14, font });
+  const form = doc.getForm();
+  const nameField = form.createTextField('name');
+  nameField.addToPage(pg, { x: 100, y: 320, width: 220, height: 26 });
+  const agree = form.createCheckBox('agree');
+  agree.addToPage(pg, { x: 100, y: 270, width: 20, height: 20 });
+  return doc.save();
+}
+const formPdf = await makeFormPdf();
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, '/tmp/form.pdf', 'form.pdf');
+}, Buffer.from(formPdf).toString('base64'));
+await page.waitForSelector('#viewer .page .annotationLayer input');
+await page.fill('#viewer .page .annotationLayer input[type="text"]', 'Eddie Khaw');
+await page.click('#viewer .page .annotationLayer input[type="checkbox"]');
+const formOk = await page.evaluate(async () => {
+  const t = window.__shellyTest;
+  if (!t.viewer.hasFormEdits) return 'no edits detected';
+  const values = await t.viewer.collectFormValues();
+  const applied = await t.engine.applyFormValues(t.state.bytes, values);
+  const readBack = await t.engine.readFormValues(applied);
+  return readBack.name === 'Eddie Khaw' && readBack.agree === true ? true : JSON.stringify(readBack);
+});
+check('form fields fill and save into the PDF', formOk === true, formOk === true ? '' : String(formOk));
+await page.screenshot({ path: path.join(outDir, '5-form.png') });
+
 await browser.close();
 server.close();
 

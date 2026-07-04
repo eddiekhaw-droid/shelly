@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, protocol } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, protocol, shell } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 
@@ -43,6 +43,18 @@ function createWindow() {
 
   win.once('ready-to-show', () => win.show());
   win.loadURL('app://bundle/index.html');
+
+  // Links inside PDFs open in the user's browser, never in the app window.
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith('app://')) {
+      e.preventDefault();
+      if (/^https?:/i.test(url)) shell.openExternal(url);
+    }
+  });
 
   win.on('close', (e) => {
     if (forceClose || !docDirty) return;

@@ -1,7 +1,20 @@
 // All PDF mutation lives here, as pure bytes-in/bytes-out functions built on
 // pdf-lib. No DOM access, so the whole module is unit-testable in Node.
 
-import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
+import {
+  PDFDocument,
+  PDFName,
+  PDFArray,
+  PDFHexString,
+  PDFTextField,
+  PDFCheckBox,
+  PDFRadioGroup,
+  PDFDropdown,
+  PDFOptionList,
+  StandardFonts,
+  degrees,
+  rgb,
+} from 'pdf-lib';
 
 async function load(bytes) {
   return PDFDocument.load(bytes, { updateMetadata: false });
@@ -108,6 +121,10 @@ export async function insertPdf(bytes, otherBytes, atIndex) {
  *     — (x, y) is the baseline start of the first line, pre-rotation.
  *   { type:'image', pageIndex, x, y, width, height, bytes, format:'png'|'jpeg' }
  *     — (x, y) is the corner that appears bottom-left on screen.
+ *   { type:'highlight', pageIndex, rects:[{x,y,width,height}], color:{r,g,b} }
+ *     — drawn with Multiply blending so the text underneath stays legible.
+ *   { type:'note', pageIndex, x, y, size, text, color:{r,g,b} }
+ *     — becomes a real /Text (sticky note) annotation other readers can open.
  */
 export async function bakeOverlays(bytes, overlays) {
   if (!overlays.length) return bytes;
@@ -139,7 +156,105 @@ export async function bakeOverlays(bytes, overlays) {
         height: ov.height,
         rotate,
       });
+    } else if (ov.type === 'highlight') {
+      for (const r of ov.rects) {
+        page.drawRectangle({
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height,
+          color: rgb(ov.color.r, ov.color.g, ov.color.b),
+          blendMode: 'Multiply',
+          rotate,
+        });
+      }
+    } else if (ov.type === 'note') {
+      if (!ov.text.trim()) continue;
+      addTextAnnotation(doc, ov);
     }
   }
   return doc.save();
+}
+
+/** Append a /Text (sticky note) annotation to a page. */
+function addTextAnnotation(doc, ov) {
+  const page = doc.getPage(ov.pageIndex);
+  const size = ov.size || 18;
+  const annot = doc.context.obj({
+    Type: 'Annot',
+    Subtype: 'Text',
+    Rect: [ov.x, ov.y, ov.x + size, ov.y + size],
+    Contents: PDFHexString.fromText(ov.text),
+    T: PDFHexString.fromText('Note'),
+    Name: 'Comment',
+    C: [ov.color.r, ov.color.g, ov.color.b],
+    F: 4, // print
+  });
+  const ref = doc.context.register(annot);
+  const annots = page.node.lookup(PDFName.of('Annots'));
+  if (annots instanceof PDFArray) {
+    annots.push(ref);
+  } else {
+    page.node.set(PDFName.of('Annots'), doc.context.obj([ref]));
+  }
+}
+
+/**
+ * Write user-entered form values into the document's AcroForm fields.
+ * values: [{ name, value }] where value is a string (text/choice fields),
+ * boolean (checkboxes) or the selected option's export value (radio groups).
+ * Unknown fields and type mismatches are skipped rather than failing the save.
+ */
+export async function applyFormValues(bytes, values) {
+  if (!values.length) return bytes;
+  const doc = await load(bytes);
+  const form = doc.getForm();
+  for (const { name, value } of values) {
+    let field;
+    try {
+      field = form.getField(name);
+    } catch {
+      continue;
+    }
+    try {
+      if (field instanceof PDFTextField) field.setText(value == null ? '' : String(value));
+      else if (field instanceof PDFCheckBox) value ? field.check() : field.uncheck();
+      else if (field instanceof PDFRadioGroup && typeof value === 'string') field.select(value);
+      else if (field instanceof PDFDropdown || field instanceof PDFOptionList) field.select(value);
+    } catch {
+      // e.g. selecting an option the field doesn't have — leave the field as-is
+    }
+  }
+  try {
+    form.updateFieldAppearances(await doc.embedFont(StandardFonts.Helvetica));
+  } catch {
+    // some exotic fields can't regenerate appearances; values are still set
+  }
+  return doc.save();
+}
+
+/** Names/values of the document's form fields (used by tests and debugging). */
+export async function readFormValues(bytes) {
+  const doc = await load(bytes);
+  const out = {};
+  for (const field of doc.getForm().getFields()) {
+    if (field instanceof PDFTextField) out[field.getName()] = field.getText();
+    else if (field instanceof PDFCheckBox) out[field.getName()] = field.isChecked();
+    else if (field instanceof PDFRadioGroup || field instanceof PDFDropdown)
+      out[field.getName()] = field.getSelected();
+  }
+  return out;
+}
+
+/** Count /Text annotations on a page (used by tests). */
+export async function countTextAnnotations(bytes, pageIndex) {
+  const doc = await load(bytes);
+  const annots = doc.getPage(pageIndex).node.lookup(PDFName.of('Annots'));
+  if (!(annots instanceof PDFArray)) return 0;
+  let count = 0;
+  for (let i = 0; i < annots.size(); i++) {
+    const a = annots.lookup(i);
+    if (a && a.get(PDFName.of('Subtype')) === PDFName.of('Text')) count++;
+  }
+  return count;
 }

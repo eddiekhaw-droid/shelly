@@ -78,8 +78,8 @@ input[type="color"] {
   cursor: pointer;
 }
 #page-num { width: 48px; }
-#text-props { display: none; align-items: center; gap: 4px; }
-#text-props.visible { display: inline-flex; }
+#text-props, #hl-props { display: none; align-items: center; gap: 4px; }
+#text-props.visible, #hl-props.visible { display: inline-flex; }
 
 /* ---------- layout ---------- */
 
@@ -140,6 +140,9 @@ input[type="color"] {
 }
 #viewer.tool-text .page { cursor: text; }
 #viewer.tool-image .page { cursor: copy; }
+#viewer.tool-note .page { cursor: copy; }
+#viewer.tool-highlight .page { cursor: text; }
+#viewer.tool-highlight .textLayer ::selection { background: rgba(255, 224, 102, 0.55); }
 
 /* ---------- pages ---------- */
 
@@ -172,7 +175,12 @@ input[type="color"] {
 }
 .textLayer ::selection { background: rgba(61, 123, 253, 0.35); }
 
-.hlLayer { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+/* layer stack inside .page: canvas 1, text 2, annotations (forms/links) 3,
+   search highlights 4, editing overlays 5 */
+#viewer .page .textLayer { z-index: 2; }
+#viewer .page .annotationLayer { position: absolute; inset: 0; z-index: 3; }
+
+.hlLayer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .hl {
   position: absolute;
   background: rgba(255, 200, 0, 0.4);
@@ -182,7 +190,7 @@ input[type="color"] {
 
 /* ---------- overlays (added text & images) ---------- */
 
-.ovLayer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+.ovLayer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 
 .overlay {
   position: absolute;
@@ -212,6 +220,40 @@ input[type="color"] {
 .overlay.ov-text:focus-within { border-color: var(--accent); }
 .overlay.ov-image { cursor: move; }
 .overlay.ov-image img { display: block; width: 100%; height: 100%; pointer-events: none; }
+
+.overlay.ov-highlight { border: none; cursor: pointer; }
+.ov-hl-rect { position: absolute; border-radius: 2px; opacity: 0.45; }
+.overlay.ov-highlight.selected .ov-hl-rect { outline: 1px dashed rgba(0, 0, 0, 0.6); }
+
+.overlay.ov-note { cursor: move; }
+.ov-note-icon {
+  width: 100%;
+  height: 100%;
+  border-radius: 5px 5px 5px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+  user-select: none;
+}
+.ov-note-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 210px;
+  height: 92px;
+  display: none;
+  z-index: 7;
+  background: #fffbe6;
+  color: #333;
+  border: 1px solid #d8c760;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: 12px/1.4 system-ui, sans-serif;
+  resize: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+}
+.overlay.ov-note.selected .ov-note-pop { display: block; }
 
 .overlay .ov-del {
   position: absolute;
@@ -311,6 +353,31 @@ body.drag-over #empty-state, body.drag-over #viewer { outline: 3px dashed var(--
 }
 #toast.error { border-color: var(--danger); }
 
+/* ---------- signature dialog ---------- */
+
+#sign-dialog {
+  background: var(--chrome);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  width: min(560px, 90vw);
+}
+#sign-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+#sign-dialog h3 { margin: 0 0 10px; font-weight: 500; }
+#sign-canvas {
+  width: 100%;
+  background: #fff;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.dialog-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+.dialog-row label { display: flex; align-items: center; gap: 6px; color: var(--dim); }
+button.primary { background: var(--accent); color: #fff; }
+button.primary:hover:not(:disabled) { background: #2f6ae8; }
+
 /* ---------- print ---------- */
 
 @media print {
@@ -324,6 +391,6 @@ body.drag-over #empty-state, body.drag-over #viewer { outline: 3px dashed var(--
     page-break-after: always;
     break-after: page;
   }
-  .hlLayer, .overlay .ov-del, .overlay .ov-resize { display: none !important; }
+  .hlLayer, .overlay .ov-del, .overlay .ov-resize, .ov-note-pop { display: none !important; }
   .overlay { border-color: transparent !important; }
 }

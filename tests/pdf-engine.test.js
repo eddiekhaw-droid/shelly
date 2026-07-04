@@ -11,6 +11,9 @@ import {
   extractPages,
   insertPdf,
   bakeOverlays,
+  applyFormValues,
+  readFormValues,
+  countTextAnnotations,
 } from '../src/pdf-engine.js';
 
 // Pages get distinct widths (100, 110, 120, …) so each page stays
@@ -160,5 +163,81 @@ describe('bakeOverlays', () => {
   it('preserves page size', async () => {
     const { width } = await getPageSize(fixture5, 3);
     expect(width).toBe(130);
+  });
+
+  it('draws highlight rectangles', async () => {
+    const bytes = await bakeOverlays(fixture5, [
+      {
+        type: 'highlight',
+        pageIndex: 0,
+        rects: [
+          { x: 10, y: 440, width: 80, height: 16 },
+          { x: 10, y: 420, width: 60, height: 16 },
+        ],
+        color: { r: 1, g: 0.9, b: 0.3 },
+      },
+    ]);
+    expect(bytes.length).toBeGreaterThan(fixture5.length);
+    expect(await getPageCount(bytes)).toBe(5);
+  });
+
+  it('adds sticky notes as real /Text annotations', async () => {
+    const bytes = await bakeOverlays(fixture5, [
+      { type: 'note', pageIndex: 1, x: 50, y: 400, size: 18, text: 'Check this figure', color: { r: 1, g: 0.83, b: 0 } },
+      { type: 'note', pageIndex: 1, x: 90, y: 300, size: 18, text: 'Second note', color: { r: 1, g: 0.83, b: 0 } },
+      { type: 'note', pageIndex: 1, x: 90, y: 200, size: 18, text: '   ', color: { r: 1, g: 0.83, b: 0 } },
+    ]);
+    expect(await countTextAnnotations(bytes, 1)).toBe(2); // whitespace-only note skipped
+    expect(await countTextAnnotations(bytes, 0)).toBe(0);
+  });
+});
+
+describe('applyFormValues', () => {
+  async function makeFormFixture() {
+    const doc = await PDFDocument.create();
+    const page = doc.addPage([400, 400]);
+    const form = doc.getForm();
+    const name = form.createTextField('applicant.name');
+    name.addToPage(page, { x: 20, y: 340, width: 200, height: 24 });
+    const agree = form.createCheckBox('agree');
+    agree.addToPage(page, { x: 20, y: 300, width: 18, height: 18 });
+    const color = form.createRadioGroup('color');
+    color.addOptionToPage('red', page, { x: 20, y: 260, width: 18, height: 18 });
+    color.addOptionToPage('blue', page, { x: 60, y: 260, width: 18, height: 18 });
+    const size = form.createDropdown('size');
+    size.addOptions(['S', 'M', 'L']);
+    size.addToPage(page, { x: 20, y: 220, width: 80, height: 24 });
+    return doc.save();
+  }
+
+  it('writes text, checkbox, radio and dropdown values', async () => {
+    const fixture = await makeFormFixture();
+    const bytes = await applyFormValues(fixture, [
+      { name: 'applicant.name', value: 'Eddie Khaw' },
+      { name: 'agree', value: true },
+      { name: 'color', value: 'blue' },
+      { name: 'size', value: 'M' },
+    ]);
+    const values = await readFormValues(bytes);
+    expect(values['applicant.name']).toBe('Eddie Khaw');
+    expect(values['agree']).toBe(true);
+    expect(values['color']).toBe('blue');
+    expect(values['size']).toEqual(['M']);
+  });
+
+  it('skips unknown fields and bad options without failing', async () => {
+    const fixture = await makeFormFixture();
+    const bytes = await applyFormValues(fixture, [
+      { name: 'no.such.field', value: 'x' },
+      { name: 'color', value: 'green' }, // not an option
+      { name: 'applicant.name', value: 'Still applied' },
+    ]);
+    const values = await readFormValues(bytes);
+    expect(values['applicant.name']).toBe('Still applied');
+  });
+
+  it('returns input bytes untouched when there is nothing to apply', async () => {
+    const fixture = await makeFormFixture();
+    expect(await applyFormValues(fixture, [])).toBe(fixture);
   });
 });

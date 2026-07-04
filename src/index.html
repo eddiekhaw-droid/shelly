@@ -34,12 +34,18 @@
 
     <div class="tool-group">
       <button id="tool-select" class="tool active" title="Select / pan">Select</button>
+      <button id="tool-highlight" class="tool" title="Drag over text to highlight it">Highlight</button>
       <button id="tool-text" class="tool" title="Click a page to add a text box">+ Text</button>
+      <button id="tool-note" class="tool" title="Click a page to add a sticky note">+ Note</button>
       <button id="tool-image" class="tool" title="Place an image on a page">+ Image</button>
+      <button id="tool-sign" class="tool" title="Draw a signature and place it">Sign</button>
     </div>
     <span id="text-props">
       <input id="text-size" type="number" min="6" max="96" value="16" title="Font size (pt)" />
       <input id="text-color" type="color" value="#d92626" title="Text color" />
+    </span>
+    <span id="hl-props">
+      <input id="hl-color" type="color" value="#ffe066" title="Highlight color" />
     </span>
     <span class="spacer"></span>
 
@@ -87,6 +93,23 @@
     <span class="spacer"></span>
     <span id="status-info"></span>
   </footer>
+
+  <dialog id="sign-dialog">
+    <h3>Draw your signature</h3>
+    <canvas id="sign-canvas" width="1000" height="320"></canvas>
+    <div class="dialog-row">
+      <label>Ink
+        <select id="sign-color">
+          <option value="#14151a">Black</option>
+          <option value="#1a3f9e">Blue</option>
+        </select>
+      </label>
+      <span class="spacer"></span>
+      <button id="sign-clear">Clear</button>
+      <button id="sign-cancel">Cancel</button>
+      <button id="sign-use" class="primary">Use signature</button>
+    </div>
+  </dialog>
 
   <!-- Fallbacks used when running outside Electron (dev/testing in a browser) -->
   <input id="file-fallback" type="file" accept="application/pdf" hidden />

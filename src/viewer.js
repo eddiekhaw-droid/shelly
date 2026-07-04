@@ -4,6 +4,8 @@
 // The legacy build carries polyfills for newer JS features, widening the
 // range of Electron/Chromium versions the app runs on.
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { SimpleLinkService } from 'pdfjs-dist/legacy/web/pdf_viewer.mjs';
+import 'pdfjs-dist/legacy/web/pdf_viewer.css';
 import workerUrl from 'pdfjs-dist/legacy/build/pdf.worker.mjs?url';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
@@ -39,6 +41,12 @@ export class Viewer extends EventTarget {
     }
     // pdf.js takes ownership of (detaches) the buffer, so hand it a copy.
     this.doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+    this.fieldObjects = await this.doc.getFieldObjects().catch(() => null);
+    this.linkService = new SimpleLinkService();
+    this.linkService.setDocument?.(this.doc, null);
+    // Typing into a form field marks the document as edited.
+    this.doc.annotationStorage.onSetModified = () =>
+      this.dispatchEvent(new CustomEvent('formchange'));
     const proxies = [];
     for (let i = 1; i <= this.doc.numPages; i++) proxies.push(await this.doc.getPage(i));
     this.proxies = proxies;
@@ -90,14 +98,16 @@ export class Viewer extends EventTarget {
       const canvas = document.createElement('canvas');
       const textLayerDiv = document.createElement('div');
       textLayerDiv.className = 'textLayer';
+      const annLayerDiv = document.createElement('div');
+      annLayerDiv.className = 'annotationLayer';
       const hlLayer = document.createElement('div');
       hlLayer.className = 'hlLayer';
       const ovLayer = document.createElement('div');
       ovLayer.className = 'ovLayer';
-      el.append(canvas, textLayerDiv, hlLayer, ovLayer);
+      el.append(canvas, textLayerDiv, annLayerDiv, hlLayer, ovLayer);
       this.root.appendChild(el);
 
-      this.pages.push({ proxy, el, canvas, textLayerDiv, hlLayer, ovLayer, viewport, rendered: false, rendering: null });
+      this.pages.push({ proxy, el, canvas, textLayerDiv, annLayerDiv, hlLayer, ovLayer, viewport, rendered: false, rendering: null });
     }
 
     this.observer = new IntersectionObserver(
@@ -117,6 +127,25 @@ export class Viewer extends EventTarget {
     const p = this.pages[i];
     if (!p || p.rendered || p.rendering) return p?.rendering;
     p.rendering = (async () => {
+      try {
+        await this.#renderPageInner(p, i);
+        p.rendered = true;
+        this.dispatchEvent(new CustomEvent('pagerendered', { detail: { pageIndex: i } }));
+      } catch (err) {
+        // Typically RenderingCancelledException: the document was replaced
+        // mid-render (open/zoom/page edit). The new layout re-renders anyway.
+        if (err?.name !== 'RenderingCancelledException') {
+          console.warn('render failed on page', i + 1, err);
+        }
+      } finally {
+        p.rendering = null;
+      }
+    })();
+    return p.rendering;
+  }
+
+  async #renderPageInner(p, i) {
+    {
       const dpr = Math.min(window.devicePixelRatio || 1, 3);
       p.canvas.width = Math.floor(p.viewport.width * dpr);
       p.canvas.height = Math.floor(p.viewport.height * dpr);
@@ -140,11 +169,36 @@ export class Viewer extends EventTarget {
         console.warn('text layer failed on page', i + 1, err);
       }
 
-      p.rendered = true;
-      p.rendering = null;
-      this.dispatchEvent(new CustomEvent('pagerendered', { detail: { pageIndex: i } }));
-    })();
-    return p.rendering;
+      // Annotation layer: interactive form fields, links, and sticky notes.
+      try {
+        const annotations = await p.proxy.getAnnotations({ intent: 'display' });
+        if (annotations.length) {
+          const layer = new pdfjsLib.AnnotationLayer({
+            div: p.annLayerDiv,
+            page: p.proxy,
+            viewport: p.viewport.clone({ dontFlip: true }),
+            linkService: this.linkService,
+            annotationStorage: this.doc.annotationStorage,
+            annotationCanvasMap: null,
+            accessibilityManager: null,
+            annotationEditorUIManager: null,
+            structTreeLayer: null,
+          });
+          await layer.render({
+            annotations,
+            imageResourcesPath: '',
+            renderForms: true,
+            downloadManager: null,
+            enableScripting: false,
+            hasJSActions: false,
+            fieldObjects: this.fieldObjects,
+          });
+        }
+      } catch (err) {
+        console.warn('annotation layer failed on page', i + 1, err);
+      }
+
+    }
   }
 
   async renderAllPages() {
@@ -188,6 +242,36 @@ export class Viewer extends EventTarget {
     if (!el) return;
     this.root.scrollTop = el.offsetTop + yView - this.root.clientHeight / 3;
     this.#trackCurrentPage();
+  }
+
+  /** Has the user typed/clicked anything into form fields since load? */
+  get hasFormEdits() {
+    return !!this.doc && this.doc.annotationStorage.size > 0;
+  }
+
+  /**
+   * User-entered form values as [{name, value}] for pdf-engine.applyFormValues.
+   * pdf.js stores values per widget annotation id; map them to field names.
+   */
+  async collectFormValues() {
+    if (!this.hasFormEdits) return [];
+    const storage = this.doc.annotationStorage;
+    const byName = new Map();
+    for (const proxy of this.proxies) {
+      for (const ann of await proxy.getAnnotations({ intent: 'display' })) {
+        if (!ann.fieldName) continue;
+        const entry = storage.getRawValue(ann.id);
+        if (entry === undefined || entry.value === undefined) continue;
+        if (ann.radioButton) {
+          if (entry.value) byName.set(ann.fieldName, ann.buttonValue);
+        } else if (ann.checkBox) {
+          byName.set(ann.fieldName, entry.value === true);
+        } else {
+          byName.set(ann.fieldName, entry.value);
+        }
+      }
+    }
+    return [...byName].map(([name, value]) => ({ name, value }));
   }
 
   #trackCurrentPage() {
