@@ -58,6 +58,8 @@
     <button id="btn-print" class="icon" disabled title="Print (Ctrl+P)">&#128424;</button>
   </header>
 
+  <div id="tabbar" hidden></div>
+
   <div id="main">
     <aside id="sidebar">
       <div id="thumb-actions">
@@ -67,7 +69,7 @@
         <button id="pg-extract" class="icon" title="Extract page(s) to a new PDF" disabled>&#8659;</button>
         <button id="pg-insert" class="icon" title="Insert pages from another PDF" disabled>&#10133;</button>
       </div>
-      <div id="thumbs"></div>
+      <div id="thumbs-host"></div>
     </aside>
 
     <div id="viewer-wrap">
@@ -78,11 +80,11 @@
         <button id="find-next" class="icon" title="Next match (Enter)">&#9660;</button>
         <button id="find-close" class="icon" title="Close (Esc)">&#10005;</button>
       </div>
-      <div id="viewer" tabindex="0"></div>
+      <div id="viewers"></div>
       <div id="empty-state">
         <div class="logo">Shelly&nbsp;PDF</div>
-        <p>Drop a PDF anywhere, or</p>
-        <button id="empty-open">Open a PDF&hellip;</button>
+        <p>Drop PDFs anywhere, or</p>
+        <button id="empty-open">Open PDFs&hellip;</button>
       </div>
       <div id="toast" hidden></div>
     </div>
@@ -112,7 +114,7 @@
   </dialog>
 
   <!-- Fallbacks used when running outside Electron (dev/testing in a browser) -->
-  <input id="file-fallback" type="file" accept="application/pdf" hidden />
+  <input id="file-fallback" type="file" accept="application/pdf" multiple hidden />
   <input id="image-fallback" type="file" accept="image/png,image/jpeg" hidden />
 
   <script type="module" src="./app.js"></script>

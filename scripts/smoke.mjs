@@ -78,25 +78,25 @@ await page.evaluate(async (b64) => {
   await window.__shellyTest.openBytes(bytes, '/tmp/fixture.pdf', 'fixture.pdf');
 }, Buffer.from(fixture).toString('base64'));
 
-await page.waitForFunction(() => document.querySelectorAll('#viewer .page canvas').length === 3);
+await page.waitForFunction(() => document.querySelectorAll('.viewer.active .page canvas').length === 3);
 await page.waitForFunction(() => {
-  const c = document.querySelector('#viewer .page canvas');
+  const c = document.querySelector('.viewer.active .page canvas');
   return c && c.width > 0;
 });
 check('opens a 3-page PDF', (await page.textContent('#page-total')).trim() === '/ 3');
 
 // canvas actually painted? sample the colored header bar
 const painted = await page.evaluate(() => {
-  const c = document.querySelector('#viewer .page canvas');
+  const c = document.querySelector('.viewer.active .page canvas');
   const px = c.getContext('2d').getImageData(Math.floor(c.width / 2), 10, 1, 1).data;
   return px[0] > 150 && px[1] < 150; // reddish header on page 1
 });
 check('page 1 canvas is painted with content', painted);
 
-const textLayerSpans = await page.locator('#viewer .page .textLayer span').count();
+const textLayerSpans = await page.locator('.viewer.active .page .textLayer span').count();
 check('text layer built (selectable text)', textLayerSpans > 0, `${textLayerSpans} spans`);
 
-await page.waitForFunction(() => document.querySelectorAll('#thumbs .thumb').length === 3);
+await page.waitForFunction(() => document.querySelectorAll('.thumbs.active .thumb').length === 3);
 check('thumbnails built', true);
 await page.screenshot({ path: path.join(outDir, '1-reader.png') });
 
@@ -112,7 +112,7 @@ await page.screenshot({ path: path.join(outDir, '2-search.png') });
 await page.click('#find-close');
 
 // --- rotate page 2 ---
-await page.click('#thumbs .thumb:nth-child(2)');
+await page.click('.thumbs.active .thumb:nth-child(2)');
 await page.click('#pg-rotate-r');
 await page.waitForFunction(() => !document.getElementById('btn-undo').disabled);
 const rot = await page.evaluate(() =>
@@ -120,7 +120,7 @@ const rot = await page.evaluate(() =>
 );
 check('rotate right sets /Rotate 90 on page 2', rot === 90);
 const landscape = await page.evaluate(() => {
-  const el = document.querySelectorAll('#viewer .page')[1];
+  const el = document.querySelectorAll('.viewer.active .page')[1];
   return el.offsetWidth > el.offsetHeight;
 });
 check('rotated page renders landscape', landscape);
@@ -139,7 +139,7 @@ check('reorder moves rotated page from slot 2 to slot 3', true);
 
 // --- add a text overlay and bake ---
 await page.click('#tool-text');
-await page.click('#viewer .page', { position: { x: 200, y: 300 } });
+await page.click('.viewer.active .page', { position: { x: 200, y: 300 } });
 await page.keyboard.type('Reviewed by Shelly');
 await page.click('#status-file'); // blur commits the text
 const bakedGrows = await page.evaluate(async () => {
@@ -153,14 +153,14 @@ check('text overlay bakes into the PDF', bakedGrows);
 await page.screenshot({ path: path.join(outDir, '3-edit.png') });
 
 // --- delete page ---
-await page.click('#thumbs .thumb:nth-child(1)');
+await page.click('.thumbs.active .thumb:nth-child(1)');
 await page.click('#pg-delete');
-await page.waitForFunction(() => document.querySelectorAll('#viewer .page').length === 2);
+await page.waitForFunction(() => document.querySelectorAll('.viewer.active .page').length === 2);
 check('delete page leaves 2 pages', (await page.textContent('#page-total')).trim() === '/ 2');
 
 // --- undo restores it ---
 await page.click('#btn-undo');
-await page.waitForFunction(() => document.querySelectorAll('#viewer .page').length === 3);
+await page.waitForFunction(() => document.querySelectorAll('.viewer.active .page').length === 3);
 check('undo restores the deleted page', true);
 
 // --- a second undo takes back the text overlay ---
@@ -170,10 +170,10 @@ await page.waitForFunction(() => window.__shellyTest.overlays.items.length === 0
 check('second undo removes the text overlay', true);
 
 // --- zoom ---
-const w1 = await page.evaluate(() => document.querySelector('#viewer .page').offsetWidth);
+const w1 = await page.evaluate(() => document.querySelector('.viewer.active .page').offsetWidth);
 await page.click('#btn-zoom-in');
 await page.waitForFunction(
-  (prev) => document.querySelector('#viewer .page').offsetWidth > prev,
+  (prev) => document.querySelector('.viewer.active .page').offsetWidth > prev,
   w1
 );
 check('zoom in enlarges pages', true);
@@ -188,14 +188,14 @@ await page.evaluate(async (b64) => {
   await window.__shellyTest.openBytes(bytes, '/tmp/fixture.pdf', 'fixture.pdf');
 }, Buffer.from(fixture).toString('base64'));
 await page.waitForFunction(() => {
-  const spans = document.querySelectorAll('#viewer .page .textLayer span');
+  const spans = document.querySelectorAll('.viewer.active .page .textLayer span');
   return spans.length > 0;
 });
 
 // --- highlight: drag across the body text on page 1 ---
 await page.click('#tool-highlight');
 const spanBox = await page.evaluate(() => {
-  const span = document.querySelector('#viewer .page .textLayer span');
+  const span = document.querySelector('.viewer.active .page .textLayer span');
   const r = span.getBoundingClientRect();
   return { x: r.x, y: r.y, w: r.width, h: r.height };
 });
@@ -218,7 +218,7 @@ check('highlight created from text selection and bakes', hlOk);
 
 // --- sticky note: place, type, bake as a real /Text annotation ---
 await page.click('#tool-note');
-await page.click('#viewer .page', { position: { x: 250, y: 400 } });
+await page.click('.viewer.active .page', { position: { x: 250, y: 400 } });
 await page.waitForSelector('.overlay.ov-note textarea');
 await page.keyboard.type('Please double-check this section');
 await page.click('#status-file'); // blur commits
@@ -245,7 +245,7 @@ await page.mouse.up();
 await page.click('#sign-use');
 await page.waitForFunction(() => !document.getElementById('sign-dialog').open);
 // page 2: page 1 has the sticky note's popup covering part of it
-await page.click('#viewer .page[data-page="1"]', { position: { x: 300, y: 300 } });
+await page.click('.viewer.active .page[data-page="1"]', { position: { x: 300, y: 300 } });
 await page.waitForFunction(() =>
   window.__shellyTest.overlays.items.some((i) => i.type === 'image')
 );
@@ -270,9 +270,9 @@ await page.evaluate(async (b64) => {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   await window.__shellyTest.openBytes(bytes, '/tmp/form.pdf', 'form.pdf');
 }, Buffer.from(formPdf).toString('base64'));
-await page.waitForSelector('#viewer .page .annotationLayer input');
-await page.fill('#viewer .page .annotationLayer input[type="text"]', 'Eddie Khaw');
-await page.click('#viewer .page .annotationLayer input[type="checkbox"]');
+await page.waitForSelector('.viewer.active .page .annotationLayer input');
+await page.fill('.viewer.active .page .annotationLayer input[type="text"]', 'Eddie Khaw');
+await page.click('.viewer.active .page .annotationLayer input[type="checkbox"]');
 const formOk = await page.evaluate(async () => {
   const t = window.__shellyTest;
   if (!t.viewer.hasFormEdits) return 'no edits detected';
@@ -283,6 +283,22 @@ const formOk = await page.evaluate(async () => {
 });
 check('form fields fill and save into the PDF', formOk === true, formOk === true ? '' : String(formOk));
 await page.screenshot({ path: path.join(outDir, '5-form.png') });
+
+// --- tabs: multiple documents open at once ---
+const tabCount = await page.evaluate(() => window.__shellyTest.sessionCount());
+check('three documents open in tabs', tabCount === 3, `tabs=${tabCount}`);
+const visibleViewers = await page.evaluate(() => document.querySelectorAll('.viewer.active').length);
+check('only one viewer visible at a time', visibleViewers === 1);
+await page.click('#tabbar .tab:nth-child(1)');
+await page.waitForFunction(() => document.querySelector('#page-total').textContent.trim() === '/ 3');
+check('switching tabs restores the first document (3 pages, its own state)', true);
+await page.screenshot({ path: path.join(outDir, '6-tabs.png') });
+await page.evaluate(() => window.__shellyTest.closeCurrent());
+await page.waitForFunction(() => window.__shellyTest.sessionCount() === 2);
+check(
+  'closing a tab activates a neighbor',
+  await page.evaluate(() => !!window.__shellyTest.state && document.querySelectorAll('.viewer.active').length === 1)
+);
 
 await browser.close();
 server.close();

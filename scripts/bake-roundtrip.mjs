@@ -41,15 +41,15 @@ await pg.evaluate(async (b64) => {
   await window.__shellyTest.openBytes(bytes, null, 'roundtrip.pdf');
 }, Buffer.from(fixture).toString('base64'));
 await pg.waitForFunction(() => {
-  const c = document.querySelector('#viewer .page canvas');
+  const c = document.querySelector('.viewer.active .page canvas');
   return c && c.width > 0;
 });
 
 // rotate the page so we exercise the rotated-bake path too
-await pg.click('#thumbs .thumb:nth-child(1)');
+await pg.click('.thumbs.active .thumb:nth-child(1)');
 await pg.click('#pg-rotate-r');
 await pg.waitForFunction(() => {
-  const el = document.querySelector('#viewer .page');
+  const el = document.querySelector('.viewer.active .page');
   return el && el.offsetWidth > el.offsetHeight;
 });
 
@@ -61,7 +61,7 @@ await pg.$eval('#text-color', (el) => {
   el.value = '#0a7d20';
   el.dispatchEvent(new Event('input'));
 });
-await pg.click('#viewer .page', { position: { x: 300, y: 250 } });
+await pg.click('.viewer.active .page', { position: { x: 300, y: 250 } });
 await pg.keyboard.type('BAKED HERE');
 await pg.click('#btn-sidebar'); // blur without touching page/toolbar inputs
 await pg.click('#btn-sidebar');
@@ -79,7 +79,7 @@ const pos = await pg.evaluate(async () => {
   return { x: before.x, y: before.y };
 });
 await pg.waitForFunction(() => {
-  const c = document.querySelector('#viewer .page canvas');
+  const c = document.querySelector('.viewer.active .page canvas');
   return c && c.width > 0;
 });
 await pg.screenshot({ path: path.join(out, 'rt-2-after-bake.png') });
@@ -87,7 +87,7 @@ console.log('overlay was at', pos);
 
 // sample the pixel color where the text was — should be green now
 const sample = await pg.evaluate(({ x, y }) => {
-  const c = document.querySelector('#viewer .page canvas');
+  const c = document.querySelector('.viewer.active .page canvas');
   const rect = c.getBoundingClientRect();
   const dpr = c.width / rect.width;
   const px = c

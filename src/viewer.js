@@ -83,6 +83,7 @@ export class Viewer extends EventTarget {
     if (this.observer) this.observer.disconnect();
     this.root.textContent = '';
     this.scale = this.#computeScale();
+    this.layoutWidth = this.root.clientWidth; // 0 while hidden in a background tab
     this.pages = [];
 
     for (let i = 0; i < this.proxies.length; i++) {

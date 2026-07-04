@@ -10,7 +10,9 @@ leave your machine.
 ## Features
 
 **Read**
-- Open PDFs via dialog or drag-and-drop
+- Open multiple PDFs at once in tabs — each keeps its own zoom, scroll position,
+  edits, and undo history (Ctrl+W closes a tab)
+- Open PDFs via dialog (multi-select) or drag-and-drop
 - Continuous scrolling, page navigation, thumbnail sidebar
 - Zoom: presets, fit-width, fit-page (`Ctrl+=`, `Ctrl+-`, `Ctrl+0/1/2`)
 - Selectable text and full-document search with highlighted matches (`Ctrl+F`)
@@ -80,8 +82,9 @@ electron/main.cjs     Electron main process: window, app menu, native open/save
                       custom app:// protocol (file:// pages can't spawn the
                       pdf.js worker).
 electron/preload.cjs  Sandboxed contextBridge API (window.shelly)
-src/app.js            State, wiring, undo/redo, save flow. Falls back to file
-                      input + download when run in a plain browser.
+src/app.js            Tabbed document sessions (one viewer/thumbnails/overlays/
+                      undo stack per open PDF), toolbar wiring, save flow. Falls
+                      back to file input + download when run in a plain browser.
 src/pdf-engine.js     All PDF mutation (pdf-lib): rotate/delete/reorder/extract/
                       insert/bake — pure bytes-in/bytes-out, unit-tested
 src/viewer.js         pdf.js rendering: lazy page render, zoom, text layer,

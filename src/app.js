@@ -5,6 +5,7 @@ import { Searcher } from './search.js';
 import { OverlayManager } from './overlays.js';
 
 const $ = (id) => document.getElementById(id);
+const UNDO_LIMIT = 20;
 
 // ---------------------------------------------------------------------------
 // Host: Electron preload API, or a browser fallback (file input + download)
@@ -14,27 +15,29 @@ const $ = (id) => document.getElementById(id);
 const host = window.shelly ?? makeBrowserHost();
 
 function makeBrowserHost() {
-  const pickFile = (input) =>
+  const readFile = async (file) => ({
+    path: null,
+    name: file.name,
+    format: file.type === 'image/png' ? 'png' : 'jpeg',
+    data: new Uint8Array(await file.arrayBuffer()),
+  });
+  const pick = (input) =>
     new Promise((resolve) => {
       input.onchange = async () => {
-        const file = input.files[0];
+        const files = [...input.files];
         input.value = '';
-        if (!file) return resolve({ canceled: true });
-        const data = new Uint8Array(await file.arrayBuffer());
-        resolve({
-          canceled: false,
-          path: null,
-          name: file.name,
-          format: file.type === 'image/png' ? 'png' : 'jpeg',
-          data,
-        });
+        if (!files.length) return resolve({ canceled: true });
+        resolve({ canceled: false, files: await Promise.all(files.map(readFile)) });
       };
       input.click();
     });
 
   return {
-    openPdf: () => pickFile($('file-fallback')),
-    openImage: () => pickFile($('image-fallback')),
+    openPdf: () => pick($('file-fallback')),
+    openImage: async () => {
+      const res = await pick($('image-fallback'));
+      return res.canceled ? res : { canceled: false, ...res.files[0] };
+    },
     saveAsDialog: async (defaultName) => ({ canceled: false, path: `download:${defaultName}` }),
     savePdf: async (path, data) => {
       const name = path.startsWith('download:') ? path.slice(9) : 'document.pdf';
@@ -53,27 +56,12 @@ function makeBrowserHost() {
 }
 
 // ---------------------------------------------------------------------------
-// State
+// Sessions: one open document per tab, each with its own viewer, thumbnails,
+// overlays, search, undo history, and scroll/zoom state.
 // ---------------------------------------------------------------------------
 
-const state = {
-  bytes: null, // Uint8Array — current structural document
-  path: null,
-  name: null,
-  dirty: false,
-  undo: [],
-  redo: [],
-};
-const UNDO_LIMIT = 20;
-
-const viewer = new Viewer($('viewer'));
-const thumbs = new Thumbnails($('thumbs'));
-const searcher = new Searcher(viewer, { count: $('find-count') });
-const overlays = new OverlayManager(viewer);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const sessions = [];
+let current = null;
 
 let toastTimer;
 function toast(message, isError = false) {
@@ -85,268 +73,399 @@ function toast(message, isError = false) {
   toastTimer = setTimeout(() => (el.hidden = true), isError ? 6000 : 3000);
 }
 
-function setDirty(dirty) {
-  state.dirty = dirty;
-  host.setDirty(dirty && !!state.bytes);
-  document.title = state.name ? `${dirty ? '● ' : ''}${state.name} — Shelly PDF` : 'Shelly PDF';
-  refreshUi();
-}
+class Session {
+  constructor(bytes, path, name) {
+    this.state = { bytes, path, name, dirty: false, undo: [], redo: [] };
+    this.overlayShadow = [];
 
-function refreshUi() {
-  const loaded = !!state.bytes;
-  for (const id of ['btn-save', 'btn-save-as', 'btn-print', 'pg-insert']) $(id).disabled = !loaded;
-  $('page-num').disabled = !loaded;
-  $('btn-undo').disabled = !state.undo.length;
-  $('btn-redo').disabled = !state.redo.length;
-  const sel = thumbs.selection;
-  const pageActionable = loaded && (sel.length > 0 || viewer.pageCount > 0);
-  for (const id of ['pg-rotate-l', 'pg-rotate-r', 'pg-delete', 'pg-extract']) {
-    $(id).disabled = !pageActionable;
+    this.viewerEl = document.createElement('div');
+    this.viewerEl.className = 'viewer';
+    this.viewerEl.tabIndex = 0;
+    $('viewers').appendChild(this.viewerEl);
+
+    this.thumbsEl = document.createElement('div');
+    this.thumbsEl.className = 'thumbs';
+    $('thumbs-host').appendChild(this.thumbsEl);
+
+    this.tabEl = document.createElement('div');
+    this.tabEl.className = 'tab';
+    const label = document.createElement('span');
+    label.className = 'tab-label';
+    const dirtyDot = document.createElement('span');
+    dirtyDot.className = 'tab-dirty';
+    const close = document.createElement('button');
+    close.className = 'tab-close';
+    close.textContent = '✕';
+    close.title = 'Close tab';
+    this.tabEl.append(label, dirtyDot, close);
+    $('tabbar').appendChild(this.tabEl);
+    this.tabEl.addEventListener('click', (e) => {
+      if (e.target === close) return;
+      activateSession(this);
+    });
+    close.addEventListener('click', () => closeSession(this));
+
+    this.viewer = new Viewer(this.viewerEl);
+    this.thumbs = new Thumbnails(this.thumbsEl);
+    this.searcher = new Searcher(this.viewer, { count: $('find-count') });
+    this.overlays = new OverlayManager(this.viewer);
+
+    const ifActive = (fn) => () => {
+      if (current === this) fn();
+    };
+
+    this.viewer.addEventListener('pagechange', (e) => {
+      if (current !== this) return;
+      $('page-num').value = e.detail.pageIndex + 1;
+      this.thumbs.setCurrent(e.detail.pageIndex);
+    });
+    this.viewer.addEventListener('layout', ifActive(refreshUi));
+    this.viewer.addEventListener('formchange', () => this.markDirty(true));
+
+    this.overlays.addEventListener('change', (e) => {
+      // Non-structural changes are live typing; they become undoable only
+      // when committed (blur), which arrives as a structural change.
+      if (e.detail.structural) {
+        this.state.undo.push({ bytes: this.state.bytes, overlays: this.overlayShadow });
+        if (this.state.undo.length > UNDO_LIMIT) this.state.undo.shift();
+        this.state.redo = [];
+        this.overlayShadow = this.overlays.snapshot();
+      }
+      this.markDirty(true);
+    });
+    this.overlays.addEventListener('imageplaced', () => setTool('select'));
+    this.overlays.addEventListener('selectionchange', (e) => {
+      if (current !== this) return;
+      const item = e.detail.item;
+      if (item?.type === 'text') {
+        $('text-size').value = item.size;
+        $('text-color').value = item.color;
+        $('text-props').classList.add('visible');
+      }
+    });
+
+    this.thumbs.addEventListener('goto', (e) => this.viewer.goToPage(e.detail.pageIndex));
+    this.thumbs.addEventListener('select', ifActive(refreshUi));
+    this.thumbs.addEventListener('reorder', (e) => {
+      const order = e.detail.order;
+      this.structuralOp(
+        (bytes) => engine.reorderPages(bytes, order),
+        () => this.overlays.remapAfterReorder(order)
+      );
+    });
   }
-  $('status-file').textContent = loaded ? state.name : 'No document';
-  $('status-info').textContent = loaded
-    ? `${viewer.pageCount} page${viewer.pageCount === 1 ? '' : 's'} · ${Math.round(viewer.scale * 100)}%`
-    : '';
-}
 
-function syncZoomSelect() {
-  const select = $('zoom-select');
-  if (typeof viewer.zoomMode === 'string') {
-    select.value = viewer.zoomMode;
-  } else {
-    const preset = [...select.options].find((o) => Number(o.value) === viewer.zoomMode);
-    select.value = preset ? preset.value : '';
+  markDirty(dirty) {
+    this.state.dirty = dirty;
+    host.setDirty(sessions.some((s) => s.state.dirty));
+    updateTabs();
+    if (current === this) refreshUi();
+  }
+
+  async reload({ keepPage = true } = {}) {
+    const page = keepPage ? this.viewer.currentPage : 0;
+    await this.viewer.load(this.state.bytes);
+    this.searcher.reset();
+    this.overlays.mountAll();
+    this.thumbs.build(this.viewer); // not awaited: thumbnails fill in behind
+    if (keepPage && page > 0) this.viewer.goToPage(Math.min(page, this.viewer.pageCount - 1));
+    this.overlayShadow = this.overlays.snapshot();
+    if (current === this) syncSessionUi();
+  }
+
+  /** Snapshot for undo, transform bytes, remap overlays, reload. */
+  async structuralOp(fn, remapOverlays) {
+    this.state.undo.push({ bytes: this.state.bytes, overlays: this.overlays.snapshot() });
+    if (this.state.undo.length > UNDO_LIMIT) this.state.undo.shift();
+    this.state.redo = [];
+    try {
+      const next = await fn(this.state.bytes);
+      if (remapOverlays) remapOverlays();
+      this.state.bytes = next;
+      await this.reload();
+      this.markDirty(true);
+    } catch (err) {
+      this.state.undo.pop();
+      toast(err.message, true);
+      if (current === this) refreshUi();
+    }
+  }
+
+  targetPages() {
+    const sel = this.thumbs.selection;
+    return sel.length ? sel : [this.viewer.currentPage];
+  }
+
+  async rotateSelection(delta) {
+    const pages = this.targetPages();
+    const dims = new Map(
+      pages.map((i) => {
+        const v = this.viewer.baseViewport(i);
+        return [i, { width: v.width, height: v.height }];
+      })
+    );
+    await this.structuralOp(
+      (bytes) => engine.rotatePages(bytes, pages, delta),
+      () => this.overlays.remapAfterRotate(pages, delta, dims)
+    );
+  }
+
+  async deleteSelection() {
+    const pages = this.targetPages();
+    await this.structuralOp(
+      (bytes) => engine.deletePages(bytes, pages),
+      () => this.overlays.remapAfterDelete(pages)
+    );
+  }
+
+  async extractSelection() {
+    const pages = this.targetPages();
+    const res = await host.saveAsDialog(
+      (this.state.name || 'document.pdf').replace(/\.pdf$/i, '') + '-pages.pdf'
+    );
+    if (res.canceled) return;
+    try {
+      const data = await engine.extractPages(this.state.bytes, pages);
+      const write = await host.savePdf(res.path, data);
+      if (!write.ok) throw new Error(write.error);
+      toast(`Extracted ${pages.length} page${pages.length === 1 ? '' : 's'}.`);
+    } catch (err) {
+      toast(err.message, true);
+    }
+  }
+
+  async insertPdf() {
+    const res = await host.openPdf();
+    if (res.canceled) return;
+    const file = res.files[0];
+    const other = file.data instanceof Uint8Array ? file.data : new Uint8Array(file.data);
+    try {
+      await engine.validatePdf(other);
+    } catch (err) {
+      toast(err.message, true);
+      return;
+    }
+    const sel = this.thumbs.selection;
+    const at = sel.length ? sel[sel.length - 1] + 1 : this.viewer.pageCount;
+    const count = await engine.getPageCount(other);
+    await this.structuralOp(
+      (bytes) => engine.insertPdf(bytes, other, at),
+      () => this.overlays.remapAfterInsert(at, count)
+    );
+    toast(`Inserted ${count} page${count === 1 ? '' : 's'} from ${file.name}.`);
+  }
+
+  async buildSaveBytes() {
+    let data = this.state.bytes;
+    if (this.viewer.hasFormEdits) {
+      data = await engine.applyFormValues(data, await this.viewer.collectFormValues());
+    }
+    if (!this.overlays.isEmpty) {
+      data = await engine.bakeOverlays(data, this.overlays.bakePayload());
+    }
+    return data;
+  }
+
+  async save() {
+    if (!this.state.path) return this.saveAs();
+    const data = await this.buildSaveBytes();
+    const res = await host.savePdf(this.state.path, data);
+    if (!res.ok) {
+      toast(`Could not save: ${res.error}`, true);
+      return false;
+    }
+    await this.adoptSaved(data);
+    toast('Saved.');
+    return true;
+  }
+
+  async saveAs() {
+    const res = await host.saveAsDialog(this.state.name || 'document.pdf');
+    if (res.canceled) return false;
+    const data = await this.buildSaveBytes();
+    const write = await host.savePdf(res.path, data);
+    if (!write.ok) {
+      toast(`Could not save: ${write.error}`, true);
+      return false;
+    }
+    if (!res.path.startsWith('download:')) {
+      this.state.path = res.path;
+      this.state.name = res.path.split(/[\\/]/).pop();
+    }
+    await this.adoptSaved(data);
+    toast('Saved.');
+    return true;
+  }
+
+  async adoptSaved(data) {
+    // Overlays and form values are now part of the document; drop the
+    // editable copies and re-render from the saved bytes.
+    const needReload = !this.overlays.isEmpty || this.viewer.hasFormEdits;
+    this.state.bytes = data;
+    if (needReload) {
+      this.overlays.clear();
+      await this.reload();
+    }
+    this.state.undo = [];
+    this.state.redo = [];
+    this.markDirty(false);
+  }
+
+  async undo() {
+    const active = document.activeElement;
+    if (active && active.isContentEditable) {
+      document.execCommand('undo');
+      return;
+    }
+    const snap = this.state.undo.pop();
+    if (!snap) return;
+    this.state.redo.push({ bytes: this.state.bytes, overlays: this.overlays.snapshot() });
+    this.state.bytes = snap.bytes;
+    this.overlays.restore(snap.overlays);
+    await this.reload();
+    this.markDirty(true);
+  }
+
+  async redo() {
+    const snap = this.state.redo.pop();
+    if (!snap) return;
+    this.state.undo.push({ bytes: this.state.bytes, overlays: this.overlays.snapshot() });
+    this.state.bytes = snap.bytes;
+    this.overlays.restore(snap.overlays);
+    await this.reload();
+    this.markDirty(true);
+  }
+
+  destroy() {
+    this.overlays.clear();
+    this.viewer.doc?.destroy();
+    this.viewerEl.remove();
+    this.thumbsEl.remove();
+    this.tabEl.remove();
   }
 }
 
-/** Pages an action applies to: the thumbnail selection, else the current page. */
-function targetPages() {
-  const sel = thumbs.selection;
-  return sel.length ? sel : [viewer.currentPage];
-}
-
-function pushUndo() {
-  state.undo.push({ bytes: state.bytes, overlays: overlays.snapshot() });
-  if (state.undo.length > UNDO_LIMIT) state.undo.shift();
-  state.redo = [];
-}
-
-// Rolling pre-change copy of the overlay list, so an overlay edit can push
-// the state *before* itself onto the undo stack (its change event fires after
-// the mutation).
-let overlayShadow = [];
-
-async function reload({ keepPage = true } = {}) {
-  const page = keepPage ? Math.min(viewer.currentPage, 1e9) : 0;
-  await viewer.load(state.bytes);
-  searcher.reset();
-  overlays.mountAll();
-  thumbs.build(viewer); // not awaited: thumbnails fill in behind
-  if (keepPage && page > 0) viewer.goToPage(Math.min(page, viewer.pageCount - 1));
-  $('page-num').max = viewer.pageCount;
-  $('page-num').value = viewer.currentPage + 1;
-  $('page-total').textContent = `/ ${viewer.pageCount}`;
-  overlayShadow = overlays.snapshot();
-  syncZoomSelect();
-  refreshUi();
-}
+// ---------------------------------------------------------------------------
+// Session management
+// ---------------------------------------------------------------------------
 
 async function openBytes(data, path, name) {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
   try {
     await engine.validatePdf(bytes);
   } catch (err) {
-    toast(err.message, true);
-    return;
+    toast(`${name}: ${err.message}`, true);
+    return null;
   }
-  state.bytes = bytes;
-  state.path = path;
-  state.name = name;
-  state.undo = [];
-  state.redo = [];
-  overlays.clear();
-  $('empty-state').classList.add('hidden');
-  await reload({ keepPage: false });
-  setDirty(false);
+  const session = new Session(bytes, path, name);
+  sessions.push(session);
+  await session.reload({ keepPage: false });
+  activateSession(session);
+  return session;
 }
 
-/** Run a structural edit: snapshot for undo, transform bytes, remap overlays, reload. */
-async function structuralOp(fn, remapOverlays) {
-  if (!state.bytes) return;
-  pushUndo();
-  try {
-    const next = await fn(state.bytes);
-    if (remapOverlays) remapOverlays();
-    state.bytes = next;
-    await reload();
-    setDirty(true);
-  } catch (err) {
-    state.undo.pop();
-    toast(err.message, true);
+function activateSession(session) {
+  if (!session || current === session) return;
+  current = session;
+  for (const s of sessions) {
+    s.viewerEl.classList.toggle('active', s === session);
+    s.thumbsEl.classList.toggle('active', s === session);
+  }
+  closeFind();
+  setTool('select');
+  // A session laid out while hidden (display:none) saw a zero-width
+  // container; re-fit it now that it is visible.
+  if (
+    typeof session.viewer.zoomMode === 'string' &&
+    session.viewer.doc &&
+    session.viewer.layoutWidth !== session.viewerEl.clientWidth
+  ) {
+    session.viewer.setZoom(session.viewer.zoomMode).then(syncSessionUi);
+  }
+  updateTabs();
+  syncSessionUi();
+}
+
+function closeSession(session, { force = false } = {}) {
+  if (!force && session.state.dirty) {
+    const ok = window.confirm(`"${session.state.name}" has unsaved changes.\nClose it anyway?`);
+    if (!ok) return;
+  }
+  const idx = sessions.indexOf(session);
+  sessions.splice(idx, 1);
+  session.destroy();
+  if (current === session) {
+    current = null;
+    activateSession(sessions[Math.min(idx, sessions.length - 1)] ?? null);
+  }
+  host.setDirty(sessions.some((s) => s.state.dirty));
+  updateTabs();
+  syncSessionUi();
+}
+
+function updateTabs() {
+  $('tabbar').hidden = sessions.length === 0;
+  for (const s of sessions) {
+    s.tabEl.classList.toggle('active', s === current);
+    s.tabEl.querySelector('.tab-label').textContent = s.state.name;
+    s.tabEl.querySelector('.tab-dirty').textContent = s.state.dirty ? '•' : '';
+    s.tabEl.title = s.state.path || s.state.name;
+  }
+}
+
+function syncSessionUi() {
+  $('empty-state').classList.toggle('hidden', sessions.length > 0);
+  if (!current) {
+    document.title = 'Shelly PDF';
+    $('page-num').value = 1;
+    $('page-total').textContent = '/ 0';
     refreshUi();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// File actions
-// ---------------------------------------------------------------------------
-
-async function openPdf() {
-  const res = await host.openPdf();
-  if (res.canceled) return;
-  await openBytes(res.data, res.path, res.name);
-}
-
-async function buildSaveBytes() {
-  let data = state.bytes;
-  if (viewer.hasFormEdits) {
-    data = await engine.applyFormValues(data, await viewer.collectFormValues());
-  }
-  if (!overlays.isEmpty) {
-    data = await engine.bakeOverlays(data, overlays.bakePayload());
-  }
-  return data;
-}
-
-async function save() {
-  if (!state.bytes) return false;
-  if (!state.path) return saveAs();
-  const data = await buildSaveBytes();
-  const res = await host.savePdf(state.path, data);
-  if (!res.ok) {
-    toast(`Could not save: ${res.error}`, true);
-    return false;
-  }
-  await adoptSaved(data);
-  toast('Saved.');
-  return true;
-}
-
-async function saveAs() {
-  if (!state.bytes) return false;
-  const res = await host.saveAsDialog(state.name || 'document.pdf');
-  if (res.canceled) return false;
-  const data = await buildSaveBytes();
-  const write = await host.savePdf(res.path, data);
-  if (!write.ok) {
-    toast(`Could not save: ${write.error}`, true);
-    return false;
-  }
-  if (!res.path.startsWith('download:')) {
-    state.path = res.path;
-    state.name = res.path.split(/[\\/]/).pop();
-  }
-  await adoptSaved(data);
-  toast('Saved.');
-  return true;
-}
-
-async function adoptSaved(data) {
-  // Overlays and form values are now part of the document; drop the editable
-  // copies and re-render from the saved bytes.
-  const needReload = !overlays.isEmpty || viewer.hasFormEdits;
-  state.bytes = data;
-  if (needReload) {
-    overlays.clear();
-    await reload();
-  }
-  state.undo = [];
-  state.redo = [];
-  setDirty(false);
-}
-
-async function extractSelection() {
-  const pages = targetPages();
-  const res = await host.saveAsDialog(
-    (state.name || 'document.pdf').replace(/\.pdf$/i, '') + `-pages.pdf`
-  );
-  if (res.canceled) return;
-  try {
-    const data = await engine.extractPages(state.bytes, pages);
-    const write = await host.savePdf(res.path, data);
-    if (!write.ok) throw new Error(write.error);
-    toast(`Extracted ${pages.length} page${pages.length === 1 ? '' : 's'}.`);
-  } catch (err) {
-    toast(err.message, true);
-  }
-}
-
-async function insertPdf() {
-  const res = await host.openPdf();
-  if (res.canceled) return;
-  const other = res.data instanceof Uint8Array ? res.data : new Uint8Array(res.data);
-  try {
-    await engine.validatePdf(other);
-  } catch (err) {
-    toast(err.message, true);
     return;
   }
-  const sel = thumbs.selection;
-  const at = sel.length ? sel[sel.length - 1] + 1 : viewer.pageCount;
-  const count = await engine.getPageCount(other);
-  await structuralOp(
-    (bytes) => engine.insertPdf(bytes, other, at),
-    () => overlays.remapAfterInsert(at, count)
-  );
-  toast(`Inserted ${count} page${count === 1 ? '' : 's'} from ${res.name}.`);
+  const { state, viewer } = current;
+  document.title = `${state.dirty ? '● ' : ''}${state.name} — Shelly PDF`;
+  $('page-num').max = viewer.pageCount;
+  $('page-num').value = viewer.currentPage + 1;
+  $('page-total').textContent = `/ ${viewer.pageCount}`;
+  current.thumbs.setCurrent(viewer.currentPage);
+  syncZoomSelect();
+  refreshUi();
 }
 
-// ---------------------------------------------------------------------------
-// Page organization
-// ---------------------------------------------------------------------------
-
-async function rotateSelection(delta) {
-  const pages = targetPages();
-  const dims = new Map(
-    pages.map((i) => {
-      const v = viewer.baseViewport(i);
-      return [i, { width: v.width, height: v.height }];
-    })
-  );
-  await structuralOp(
-    (bytes) => engine.rotatePages(bytes, pages, delta),
-    () => overlays.remapAfterRotate(pages, delta, dims)
-  );
-}
-
-async function deleteSelection() {
-  const pages = targetPages();
-  await structuralOp(
-    (bytes) => engine.deletePages(bytes, pages),
-    () => overlays.remapAfterDelete(pages)
-  );
-}
-
-async function undo() {
-  const active = document.activeElement;
-  if (active && active.isContentEditable) {
-    document.execCommand('undo');
-    return;
+function refreshUi() {
+  const loaded = !!current;
+  for (const id of ['btn-save', 'btn-save-as', 'btn-print', 'pg-insert']) $(id).disabled = !loaded;
+  $('page-num').disabled = !loaded;
+  $('btn-undo').disabled = !current || !current.state.undo.length;
+  $('btn-redo').disabled = !current || !current.state.redo.length;
+  for (const id of ['pg-rotate-l', 'pg-rotate-r', 'pg-delete', 'pg-extract']) {
+    $(id).disabled = !loaded;
   }
-  const snap = state.undo.pop();
-  if (!snap) return;
-  state.redo.push({ bytes: state.bytes, overlays: overlays.snapshot() });
-  state.bytes = snap.bytes;
-  overlays.restore(snap.overlays);
-  await reload();
-  setDirty(true);
+  $('status-file').textContent = current ? current.state.name : 'No document';
+  $('status-info').textContent = current
+    ? `${current.viewer.pageCount} page${current.viewer.pageCount === 1 ? '' : 's'} · ${Math.round(current.viewer.scale * 100)}%`
+    : '';
+  if (current) {
+    document.title = `${current.state.dirty ? '● ' : ''}${current.state.name} — Shelly PDF`;
+  }
 }
 
-async function redo() {
-  const snap = state.redo.pop();
-  if (!snap) return;
-  state.undo.push({ bytes: state.bytes, overlays: overlays.snapshot() });
-  state.bytes = snap.bytes;
-  overlays.restore(snap.overlays);
-  await reload();
-  setDirty(true);
+function syncZoomSelect() {
+  if (!current) return;
+  const select = $('zoom-select');
+  const mode = current.viewer.zoomMode;
+  if (typeof mode === 'string') {
+    select.value = mode;
+  } else {
+    const preset = [...select.options].find((o) => Number(o.value) === mode);
+    select.value = preset ? preset.value : '';
+  }
 }
 
-async function print() {
-  if (!state.bytes) return;
-  toast('Preparing pages for printing…');
-  await viewer.renderAllPages();
-  window.print();
+async function openPdfDialog() {
+  const res = await host.openPdf();
+  if (res.canceled) return;
+  for (const file of res.files) await openBytes(file.data, file.path, file.name);
 }
 
 // ---------------------------------------------------------------------------
@@ -354,7 +473,7 @@ async function print() {
 // ---------------------------------------------------------------------------
 
 function setTool(mode) {
-  overlays.setMode(mode);
+  current?.overlays.setMode(mode);
   for (const [id, m] of [
     ['tool-select', 'select'],
     ['tool-highlight', 'highlight'],
@@ -369,13 +488,14 @@ function setTool(mode) {
 }
 
 async function chooseImageTool() {
+  if (!current) return;
   const res = await host.openImage();
   if (res.canceled) {
     setTool('select');
     return;
   }
   try {
-    await overlays.setPendingImage(
+    await current.overlays.setPendingImage(
       res.data instanceof Uint8Array ? res.data : new Uint8Array(res.data),
       res.format
     );
@@ -385,6 +505,13 @@ async function chooseImageTool() {
     toast('That image could not be read.', true);
     setTool('select');
   }
+}
+
+async function print() {
+  if (!current) return;
+  toast('Preparing pages for printing…');
+  await current.viewer.renderAllPages();
+  window.print();
 }
 
 // ---- signature pad ----
@@ -441,14 +568,14 @@ signCanvas.addEventListener('pointerdown', (e) => {
 });
 
 $('tool-sign').addEventListener('click', () => {
-  if (!state.bytes) return;
+  if (!current) return;
   signClear();
   signDialog.showModal();
 });
 $('sign-clear').addEventListener('click', signClear);
 $('sign-cancel').addEventListener('click', () => signDialog.close());
 $('sign-use').addEventListener('click', async () => {
-  if (!signInk.any) {
+  if (!signInk.any || !current) {
     signDialog.close();
     return;
   }
@@ -462,45 +589,49 @@ $('sign-use').addEventListener('click', async () => {
   crop.height = h;
   crop.getContext('2d').drawImage(signCanvas, x, y, w, h, 0, 0, w, h);
   const blob = await new Promise((resolve) => crop.toBlob(resolve, 'image/png'));
-  await overlays.setPendingImage(new Uint8Array(await blob.arrayBuffer()), 'png');
+  await current.overlays.setPendingImage(new Uint8Array(await blob.arrayBuffer()), 'png');
   signDialog.close();
   setTool('image');
   toast('Click a page to place your signature.');
 });
 
 // ---------------------------------------------------------------------------
-// Wiring
+// Toolbar wiring
 // ---------------------------------------------------------------------------
 
-$('btn-open').addEventListener('click', openPdf);
-$('empty-open').addEventListener('click', openPdf);
-$('btn-save').addEventListener('click', save);
-$('btn-save-as').addEventListener('click', saveAs);
+$('btn-open').addEventListener('click', openPdfDialog);
+$('empty-open').addEventListener('click', openPdfDialog);
+$('btn-save').addEventListener('click', () => current?.save());
+$('btn-save-as').addEventListener('click', () => current?.saveAs());
 $('btn-print').addEventListener('click', print);
-$('btn-undo').addEventListener('click', undo);
-$('btn-redo').addEventListener('click', redo);
+$('btn-undo').addEventListener('click', () => current?.undo());
+$('btn-redo').addEventListener('click', () => current?.redo());
 $('btn-sidebar').addEventListener('click', () => $('sidebar').classList.toggle('hidden'));
 
-$('btn-prev').addEventListener('click', () => viewer.goToPage(viewer.currentPage - 1));
-$('btn-next').addEventListener('click', () => viewer.goToPage(viewer.currentPage + 1));
+$('btn-prev').addEventListener('click', () => current?.viewer.goToPage(current.viewer.currentPage - 1));
+$('btn-next').addEventListener('click', () => current?.viewer.goToPage(current.viewer.currentPage + 1));
 $('page-num').addEventListener('change', (e) => {
+  if (!current) return;
   const n = Number(e.target.value);
-  if (n >= 1 && n <= viewer.pageCount) viewer.goToPage(n - 1);
+  if (n >= 1 && n <= current.viewer.pageCount) current.viewer.goToPage(n - 1);
 });
 
 $('btn-zoom-in').addEventListener('click', async () => {
-  await viewer.zoomBy(1.25);
+  if (!current) return;
+  await current.viewer.zoomBy(1.25);
   syncZoomSelect();
   refreshUi();
 });
 $('btn-zoom-out').addEventListener('click', async () => {
-  await viewer.zoomBy(1 / 1.25);
+  if (!current) return;
+  await current.viewer.zoomBy(1 / 1.25);
   syncZoomSelect();
   refreshUi();
 });
 $('zoom-select').addEventListener('change', async (e) => {
+  if (!current) return;
   const v = e.target.value;
-  await viewer.setZoom(v === 'fit-width' || v === 'fit-page' ? v : Number(v));
+  await current.viewer.setZoom(v === 'fit-width' || v === 'fit-page' ? v : Number(v));
   refreshUi();
 });
 
@@ -509,59 +640,17 @@ $('tool-highlight').addEventListener('click', () => setTool('highlight'));
 $('tool-text').addEventListener('click', () => setTool('text'));
 $('tool-note').addEventListener('click', () => setTool('note'));
 $('tool-image').addEventListener('click', chooseImageTool);
-$('hl-color').addEventListener('input', (e) => overlays.setHighlightColor(e.target.value));
+$('hl-color').addEventListener('input', (e) => current?.overlays.setHighlightColor(e.target.value));
 $('text-size').addEventListener('change', (e) =>
-  overlays.setTextProps({ size: Math.max(6, Math.min(96, Number(e.target.value) || 16)) })
+  current?.overlays.setTextProps({ size: Math.max(6, Math.min(96, Number(e.target.value) || 16)) })
 );
-$('text-color').addEventListener('input', (e) => overlays.setTextProps({ color: e.target.value }));
+$('text-color').addEventListener('input', (e) => current?.overlays.setTextProps({ color: e.target.value }));
 
-$('pg-rotate-l').addEventListener('click', () => rotateSelection(-90));
-$('pg-rotate-r').addEventListener('click', () => rotateSelection(90));
-$('pg-delete').addEventListener('click', deleteSelection);
-$('pg-extract').addEventListener('click', extractSelection);
-$('pg-insert').addEventListener('click', insertPdf);
-
-overlays.addEventListener('change', (e) => {
-  // Non-structural changes are live typing; they become undoable only when
-  // committed (blur), which arrives as a structural change.
-  if (e.detail.structural) {
-    state.undo.push({ bytes: state.bytes, overlays: overlayShadow });
-    if (state.undo.length > UNDO_LIMIT) state.undo.shift();
-    state.redo = [];
-    overlayShadow = overlays.snapshot();
-  }
-  setDirty(true);
-});
-overlays.addEventListener('imageplaced', () => setTool('select'));
-overlays.addEventListener('selectionchange', (e) => {
-  const item = e.detail.item;
-  if (item?.type === 'text') {
-    $('text-size').value = item.size;
-    $('text-color').value = item.color;
-    $('text-props').classList.add('visible');
-  }
-});
-
-viewer.addEventListener('formchange', () => setDirty(true));
-
-viewer.addEventListener('pagechange', (e) => {
-  $('page-num').value = e.detail.pageIndex + 1;
-  thumbs.setCurrent(e.detail.pageIndex);
-});
-viewer.addEventListener('layout', () => {
-  syncZoomSelect();
-  refreshUi();
-});
-
-thumbs.addEventListener('goto', (e) => viewer.goToPage(e.detail.pageIndex));
-thumbs.addEventListener('select', refreshUi);
-thumbs.addEventListener('reorder', async (e) => {
-  const order = e.detail.order;
-  await structuralOp(
-    (bytes) => engine.reorderPages(bytes, order),
-    () => overlays.remapAfterReorder(order)
-  );
-});
+$('pg-rotate-l').addEventListener('click', () => current?.rotateSelection(-90));
+$('pg-rotate-r').addEventListener('click', () => current?.rotateSelection(90));
+$('pg-delete').addEventListener('click', () => current?.deleteSelection());
+$('pg-extract').addEventListener('click', () => current?.extractSelection());
+$('pg-insert').addEventListener('click', () => current?.insertPdf());
 
 // ---- find bar ----
 
@@ -570,27 +659,28 @@ const findInput = $('find-input');
 let findTimer;
 
 function openFind() {
-  if (!state.bytes) return;
+  if (!current) return;
   findbar.hidden = false;
   findInput.focus();
   findInput.select();
 }
 function closeFind() {
+  if (findbar.hidden) return;
   findbar.hidden = true;
-  searcher.clear();
-  $('viewer').focus();
+  findInput.value = '';
+  current?.searcher.clear();
 }
 
 $('btn-find').addEventListener('click', openFind);
 $('find-close').addEventListener('click', closeFind);
-$('find-next').addEventListener('click', () => searcher.next(1));
-$('find-prev').addEventListener('click', () => searcher.next(-1));
+$('find-next').addEventListener('click', () => current?.searcher.next(1));
+$('find-prev').addEventListener('click', () => current?.searcher.next(-1));
 findInput.addEventListener('input', () => {
   clearTimeout(findTimer);
-  findTimer = setTimeout(() => searcher.search(findInput.value), 200);
+  findTimer = setTimeout(() => current?.searcher.search(findInput.value), 200);
 });
 findInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') searcher.next(e.shiftKey ? -1 : 1);
+  if (e.key === 'Enter') current?.searcher.next(e.shiftKey ? -1 : 1);
   if (e.key === 'Escape') closeFind();
 });
 
@@ -606,45 +696,52 @@ window.addEventListener('dragleave', (e) => {
 window.addEventListener('drop', async (e) => {
   e.preventDefault();
   document.body.classList.remove('drag-over');
-  const file = [...(e.dataTransfer?.files || [])].find(
+  const files = [...(e.dataTransfer?.files || [])].filter(
     (f) => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf')
   );
-  if (!file) return;
-  await openBytes(new Uint8Array(await file.arrayBuffer()), null, file.name);
+  for (const file of files) {
+    await openBytes(new Uint8Array(await file.arrayBuffer()), null, file.name);
+  }
 });
 
 // ---- menu commands from the Electron main process ----
 
 host.onMenu(async (cmd) => {
   const actions = {
-    open: openPdf,
-    insert: insertPdf,
-    save,
-    'save-as': saveAs,
+    open: openPdfDialog,
+    insert: () => current?.insertPdf(),
+    save: () => current?.save(),
+    'save-as': () => current?.saveAs(),
     print,
-    undo,
-    redo,
+    undo: () => current?.undo(),
+    redo: () => current?.redo(),
     find: openFind,
+    'close-tab': () => current && closeSession(current),
     'zoom-in': () => $('btn-zoom-in').click(),
     'zoom-out': () => $('btn-zoom-out').click(),
     'zoom-100': async () => {
-      await viewer.setZoom(1);
+      await current?.viewer.setZoom(1);
       syncZoomSelect();
       refreshUi();
     },
     'fit-width': async () => {
-      await viewer.setZoom('fit-width');
+      await current?.viewer.setZoom('fit-width');
       syncZoomSelect();
       refreshUi();
     },
     'fit-page': async () => {
-      await viewer.setZoom('fit-page');
+      await current?.viewer.setZoom('fit-page');
       syncZoomSelect();
       refreshUi();
     },
     sidebar: () => $('sidebar').classList.toggle('hidden'),
     'save-and-close': async () => {
-      if (await save()) host.confirmClose();
+      // Save every dirty tab; abort the close if any save is cancelled/fails.
+      for (const s of sessions.filter((s) => s.state.dirty)) {
+        activateSession(s);
+        if (!(await s.save())) return;
+      }
+      host.confirmClose();
     },
   };
   await actions[cmd]?.();
@@ -656,12 +753,13 @@ if (!window.shelly) {
   window.addEventListener('keydown', (e) => {
     if (!(e.ctrlKey || e.metaKey)) return;
     const map = {
-      o: openPdf,
-      s: e.shiftKey ? saveAs : save,
+      o: openPdfDialog,
+      s: () => (e.shiftKey ? current?.saveAs() : current?.save()),
       f: openFind,
       p: print,
-      z: e.shiftKey ? redo : undo,
+      z: () => (e.shiftKey ? current?.redo() : current?.undo()),
       b: () => $('sidebar').classList.toggle('hidden'),
+      w: () => current && closeSession(current),
     };
     const fn = map[e.key.toLowerCase()];
     if (fn) {
@@ -672,7 +770,28 @@ if (!window.shelly) {
 }
 
 setTool('select');
-refreshUi();
+syncSessionUi();
 
 // Exposed for the automated browser smoke test.
-window.__shellyTest = { openBytes, state, viewer, searcher, overlays, engine, thumbs };
+window.__shellyTest = {
+  openBytes,
+  engine,
+  get state() {
+    return current?.state;
+  },
+  get viewer() {
+    return current?.viewer;
+  },
+  get overlays() {
+    return current?.overlays;
+  },
+  get searcher() {
+    return current?.searcher;
+  },
+  get thumbs() {
+    return current?.thumbs;
+  },
+  sessionCount: () => sessions.length,
+  activate: (i) => activateSession(sessions[i]),
+  closeCurrent: () => current && closeSession(current, { force: true }),
+};

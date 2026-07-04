@@ -103,6 +103,8 @@ function buildMenu() {
         { type: 'separator' },
         { label: 'Print…', accelerator: 'CmdOrCtrl+P', click: () => sendMenu('print') },
         { type: 'separator' },
+        { label: 'Close Tab', accelerator: 'CmdOrCtrl+W', click: () => sendMenu('close-tab') },
+        { type: 'separator' },
         process.platform === 'darwin' ? { role: 'close' } : { role: 'quit' },
       ],
     },
@@ -172,11 +174,17 @@ ipcMain.handle('dialog:open-pdf', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(win, {
     title: 'Open PDF',
     filters: [{ name: 'PDF documents', extensions: ['pdf'] }],
-    properties: ['openFile'],
+    properties: ['openFile', 'multiSelections'],
   });
   if (canceled || !filePaths.length) return { canceled: true };
-  const p = filePaths[0];
-  return { canceled: false, path: p, name: path.basename(p), data: await fs.promises.readFile(p) };
+  const files = await Promise.all(
+    filePaths.map(async (p) => ({
+      path: p,
+      name: path.basename(p),
+      data: await fs.promises.readFile(p),
+    }))
+  );
+  return { canceled: false, files };
 });
 
 ipcMain.handle('dialog:open-image', async () => {
