@@ -67,10 +67,11 @@ leave your machine.
 - Undo/redo for all edits (`Ctrl+Z` / `Ctrl+Shift+Z`)
 - Unsaved-changes indicator in the title bar and a save prompt before closing
 
-> Note: like all non-Acrobat-Pro tools, Shelly adds content *on top of* pages.
-> It does not rewrite a PDF's existing typeset text, and password-protected PDFs
-> are not supported. OCR ships with the English model; other languages can be
-> added by dropping the matching traineddata into the OCR assets.
+> Note: like all non-Acrobat-Pro tools, Shelly adds content *on top of* pages —
+> it does not rewrite a PDF's existing typeset text. Password-protected PDFs
+> open read-only (decrypted editing isn't supported). OCR ships with the English
+> model; other languages can be added by dropping the matching traineddata into
+> the OCR assets.
 
 ## Run it
 
