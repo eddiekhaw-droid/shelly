@@ -34,6 +34,20 @@ leave your machine.
   and highlightable, and saving bakes an invisible text layer into the PDF so it
   is searchable in any reader — like Acrobat's "Recognize Text".
 
+**Protect & share**
+- **Redact** — drag boxes over sensitive content; on save, affected pages are
+  flattened to ~300 DPI images with the boxes destroyed (the content truly no
+  longer exists in the file — not just covered), then auto-OCR'd so surviving
+  text stays searchable
+- **Stamp** — diagonal watermark ("CONFIDENTIAL", "DRAFT", …) with color/opacity,
+  across all pages or just the current one; undoable before save
+- **Password-protected PDFs** open read-only after a password prompt
+
+**Navigate**
+- **Bookmarks panel** — the document outline in the sidebar (Pages/Bookmarks tabs);
+  click to jump
+- **Recent files** on the start screen (installed/Electron builds)
+
 **Annotate & fill**
 - **Highlight** — drag over text to highlight it; saved as a genuine /Highlight
   annotation (selectable/removable in Acrobat), pick the color while the tool is active

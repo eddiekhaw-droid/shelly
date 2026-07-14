@@ -34,13 +34,13 @@ export class Viewer extends EventTarget {
     return this.doc ? this.doc.numPages : 0;
   }
 
-  async load(bytes) {
+  async load(bytes, password = undefined) {
     if (this.doc) {
       await this.doc.destroy();
       this.doc = null;
     }
     // pdf.js takes ownership of (detaches) the buffer, so hand it a copy.
-    this.doc = await pdfjsLib.getDocument({ data: bytes.slice() }).promise;
+    this.doc = await pdfjsLib.getDocument({ data: bytes.slice(), password }).promise;
     this.ocrWords = new Map(); // pageIndex → words from the OCR pass
     this.fieldObjects = await this.doc.getFieldObjects().catch(() => null);
     this.linkService = new SimpleLinkService();
@@ -336,6 +336,27 @@ export class Viewer extends EventTarget {
       layer.appendChild(span);
     }
     p.el.insertBefore(layer, p.hlLayer);
+  }
+
+  /** Document outline (bookmarks): [{title, dest, items: [...]}] or null. */
+  async getOutline() {
+    try {
+      return await this.doc.getOutline();
+    } catch {
+      return null;
+    }
+  }
+
+  /** Resolve an outline destination and scroll to it. */
+  async goToDestination(dest) {
+    try {
+      const d = typeof dest === 'string' ? await this.doc.getDestination(dest) : dest;
+      if (!Array.isArray(d) || !d[0]) return;
+      const pageIndex = await this.doc.getPageIndex(d[0]);
+      this.goToPage(pageIndex);
+    } catch {
+      // unresolvable destination — ignore
+    }
   }
 
   /** Has the user typed/clicked anything into form fields since load? */

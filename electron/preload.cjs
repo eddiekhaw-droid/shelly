@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('shelly', {
   openImage: () => ipcRenderer.invoke('dialog:open-image'),
   saveAsDialog: (defaultName) => ipcRenderer.invoke('dialog:save-as', defaultName),
   savePdf: (filePath, data) => ipcRenderer.invoke('file:save', filePath, data),
+  readFile: (filePath) => ipcRenderer.invoke('file:read', filePath),
   setDirty: (dirty) => ipcRenderer.send('doc:set-dirty', !!dirty),
   confirmClose: () => ipcRenderer.send('app:confirm-close'),
   onMenu: (fn) => ipcRenderer.on('menu', (_e, cmd) => fn(cmd)),

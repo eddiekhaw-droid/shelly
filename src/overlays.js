@@ -18,7 +18,7 @@ export class OverlayManager extends EventTarget {
     super();
     this.viewer = viewer;
     this.items = []; // {id,type,pageIndex,x,y,...} — see below
-    this.mode = 'select'; // 'select' | 'text' | 'image' | 'highlight' | 'note'
+    this.mode = 'select'; // 'select' | 'text' | 'image' | 'highlight' | 'note' | 'redact'
     this.pendingImage = null; // {bytes, format, objectUrl, naturalW, naturalH}
     this.selectedId = null;
     this.defaults = { size: 16, color: '#d92626', bg: false, highlight: '#ffe066', note: '#ffd400' };
@@ -40,6 +40,7 @@ export class OverlayManager extends EventTarget {
       if (this.mode === 'text') this.#placeText(pageIndex, x, y);
       else if (this.mode === 'note') this.#placeNote(pageIndex, x, y);
       else if (this.mode === 'image' && this.pendingImage) this.#placeImage(pageIndex, x, y);
+      else if (this.mode === 'redact') this.#dragRedaction(e, pageEl, pageIndex, x, y);
       e.preventDefault();
     });
 
@@ -67,7 +68,7 @@ export class OverlayManager extends EventTarget {
   setMode(mode) {
     this.mode = mode;
     if (mode !== 'image') this.pendingImage = null;
-    for (const m of ['text', 'image', 'highlight', 'note']) {
+    for (const m of ['text', 'image', 'highlight', 'note', 'redact']) {
       this.viewer.root.classList.toggle(`tool-${m}`, mode === m);
     }
   }
@@ -169,6 +170,67 @@ export class OverlayManager extends EventTarget {
       this.#mount(item);
       this.#changed();
     }
+  }
+
+  /** Rubber-band drawing of a redaction box. */
+  #dragRedaction(e, pageEl, pageIndex, startX, startY) {
+    const rubber = document.createElement('div');
+    rubber.className = 'redact-rubber';
+    this.viewer.pages[pageIndex].ovLayer.appendChild(rubber);
+    let cur = { x: startX, y: startY, w: 0, h: 0 };
+    const update = (ev) => {
+      const pr = pageEl.getBoundingClientRect();
+      const s = this.viewer.scale;
+      const px = (ev.clientX - pr.left) / s;
+      const py = (ev.clientY - pr.top) / s;
+      cur = {
+        x: Math.min(startX, px),
+        y: Math.min(startY, py),
+        w: Math.abs(px - startX),
+        h: Math.abs(py - startY),
+      };
+      const sc = this.viewer.scale;
+      rubber.style.left = `${cur.x * sc}px`;
+      rubber.style.top = `${cur.y * sc}px`;
+      rubber.style.width = `${cur.w * sc}px`;
+      rubber.style.height = `${cur.h * sc}px`;
+    };
+    const finish = () => {
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', finish);
+      rubber.remove();
+      if (cur.w < 4 || cur.h < 4) return;
+      const item = { id: nextId++, type: 'redact', pageIndex, ...cur };
+      this.items.push(item);
+      this.#mount(item);
+      this.select(item.id);
+      this.#changed();
+    };
+    window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', finish);
+  }
+
+  get hasRedactions() {
+    return this.items.some((it) => it.type === 'redact');
+  }
+
+  /** Map of pageIndex → redaction rects (view points), for the save flow. */
+  redactionsByPage() {
+    const map = new Map();
+    for (const it of this.items) {
+      if (it.type !== 'redact') continue;
+      if (!map.has(it.pageIndex)) map.set(it.pageIndex, []);
+      map.get(it.pageIndex).push({ x: it.x, y: it.y, w: it.w, h: it.h });
+    }
+    return map;
+  }
+
+  /** Remove redaction overlays after they have been applied. */
+  clearRedactions() {
+    for (const it of this.items.filter((i) => i.type === 'redact')) {
+      it.el?.remove();
+    }
+    this.items = this.items.filter((i) => i.type !== 'redact');
   }
 
   setHighlightColor(color) {
@@ -316,6 +378,11 @@ export class OverlayManager extends EventTarget {
         r.className = 'ov-hl-rect';
         el.appendChild(r);
       }
+    } else if (item.type === 'redact') {
+      const resize = document.createElement('div');
+      resize.className = 'ov-resize';
+      el.appendChild(resize);
+      this.#wireResize(item, resize);
     } else {
       const img = document.createElement('img');
       img.src = item.objectUrl;
@@ -495,7 +562,7 @@ export class OverlayManager extends EventTarget {
       }
       let bw;
       let bh;
-      if (it.type === 'image') {
+      if (it.type === 'image' || it.type === 'redact') {
         bw = it.w;
         bh = it.h;
       } else if (it.type === 'note') {
@@ -507,7 +574,7 @@ export class OverlayManager extends EventTarget {
       const mapped = mapBox({ x: it.x, y: it.y, w: bw, h: bh }, W, H);
       it.x = mapped.x;
       it.y = mapped.y;
-      if (it.type === 'image') {
+      if (it.type === 'image' || it.type === 'redact') {
         it.w = mapped.w;
         it.h = mapped.h;
       }
@@ -552,6 +619,8 @@ export class OverlayManager extends EventTarget {
           }),
           color: hexToRgb(it.color),
         });
+      } else if (it.type === 'redact') {
+        continue; // applied separately by the save flow, not baked as content
       } else if (it.type === 'note') {
         if (!it.text.trim()) continue;
         const [x, y] = viewport.convertToPdfPoint(it.x, it.y + NOTE_SIZE);

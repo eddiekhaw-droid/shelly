@@ -39,7 +39,9 @@
       <button id="tool-note" class="tool" title="Click a page to add a sticky note">+ Note</button>
       <button id="tool-image" class="tool" title="Place an image on a page">+ Image</button>
       <button id="tool-sign" class="tool" title="Draw a signature and place it">Sign</button>
+      <button id="tool-redact" class="tool" title="Drag a box over content to redact — permanently removed on save">Redact</button>
     </div>
+    <button id="btn-stamp" disabled title="Stamp a diagonal watermark across pages">Stamp</button>
     <span id="text-props">
       <input id="text-size" type="number" min="6" max="96" value="16" title="Font size (pt)" />
       <input id="text-color" type="color" value="#d92626" title="Text color" />
@@ -66,6 +68,10 @@
 
   <div id="main">
     <aside id="sidebar">
+      <div id="sidebar-tabs">
+        <button id="side-pages" class="active">Pages</button>
+        <button id="side-marks">Bookmarks</button>
+      </div>
       <div id="thumb-actions">
         <button id="pg-rotate-l" class="icon" title="Rotate left 90&deg;" disabled>&#8634;</button>
         <button id="pg-rotate-r" class="icon" title="Rotate right 90&deg;" disabled>&#8635;</button>
@@ -89,6 +95,10 @@
         <div class="logo">Shelly&nbsp;PDF</div>
         <p>Drop PDFs anywhere, or</p>
         <button id="empty-open">Open PDFs&hellip;</button>
+        <div id="recent" hidden>
+          <h4>Recent</h4>
+          <div id="recent-list"></div>
+        </div>
       </div>
       <div id="toast" hidden></div>
     </div>
@@ -99,6 +109,40 @@
     <span class="spacer"></span>
     <span id="status-info"></span>
   </footer>
+
+  <dialog id="wm-dialog">
+    <h3>Stamp watermark</h3>
+    <div class="dialog-grid">
+      <label>Text</label>
+      <input id="wm-text" type="text" value="CONFIDENTIAL" />
+      <label>Color</label>
+      <input id="wm-color" type="color" value="#c0392b" />
+      <label>Opacity</label>
+      <input id="wm-opacity" type="range" min="5" max="60" value="15" />
+      <label>Pages</label>
+      <select id="wm-scope">
+        <option value="all" selected>All pages</option>
+        <option value="current">Current page only</option>
+      </select>
+    </div>
+    <div class="dialog-row">
+      <span class="dim">Applied into the pages; use Undo to remove.</span>
+      <span class="spacer"></span>
+      <button id="wm-cancel">Cancel</button>
+      <button id="wm-apply" class="primary">Apply</button>
+    </div>
+  </dialog>
+
+  <dialog id="pw-dialog">
+    <h3>Password required</h3>
+    <p id="pw-message" class="dim"></p>
+    <input id="pw-input" type="password" placeholder="Password" autocomplete="off" />
+    <div class="dialog-row">
+      <span class="spacer"></span>
+      <button id="pw-cancel">Cancel</button>
+      <button id="pw-open" class="primary">Open</button>
+    </div>
+  </dialog>
 
   <dialog id="sign-dialog">
     <h3>Draw your signature</h3>

@@ -237,6 +237,54 @@ function addTextAnnotation(doc, ov) {
 }
 
 /**
+ * Stamp a diagonal watermark ("CONFIDENTIAL", "DRAFT", …) across pages.
+ * Drawn into the page content, angled along the page diagonal.
+ */
+export async function addWatermark(bytes, { text, color, opacity = 0.15, pageIndices = null }) {
+  if (!text.trim()) return bytes;
+  const doc = await load(bytes);
+  const font = await doc.embedFont(StandardFonts.HelveticaBold);
+  const targets = pageIndices ?? doc.getPageIndices();
+  for (const i of targets) {
+    const page = doc.getPage(i);
+    const { width: w, height: h } = page.getSize();
+    const diag = Math.hypot(w, h);
+    const angleRad = Math.atan2(h, w);
+    const size = (diag * 0.7) / Math.max(1, font.widthOfTextAtSize(text, 1));
+    const len = font.widthOfTextAtSize(text, size);
+    const capHeight = size * 0.7;
+    const cos = Math.cos(angleRad);
+    const sin = Math.sin(angleRad);
+    page.drawText(text, {
+      x: w / 2 - (len / 2) * cos + (capHeight / 2) * sin,
+      y: h / 2 - (len / 2) * sin - (capHeight / 2) * cos,
+      size,
+      font,
+      color: rgb(color.r, color.g, color.b),
+      opacity,
+      rotate: degrees((angleRad * 180) / Math.PI),
+    });
+  }
+  return doc.save();
+}
+
+/**
+ * Replace a page's entire content with a rasterized image of it — the
+ * destructive half of redaction. Every original object on the page (text,
+ * vectors, images, annotations, form fields) is removed from the file; only
+ * the supplied pixels remain. The new page is unrotated at widthPts×heightPts
+ * (the old page's *viewed* dimensions).
+ */
+export async function replacePageWithImage(bytes, pageIndex, pngBytes, widthPts, heightPts) {
+  const doc = await load(bytes);
+  const image = await doc.embedPng(pngBytes);
+  doc.removePage(pageIndex);
+  const page = doc.insertPage(pageIndex, [widthPts, heightPts]);
+  page.drawImage(image, { x: 0, y: 0, width: widthPts, height: heightPts });
+  return doc.save();
+}
+
+/**
  * Bake OCR results into the document as an invisible (opacity 0) text layer,
  * like Acrobat's "Recognize Text": the page still shows the scan, but the
  * text underneath is searchable and selectable in any reader.

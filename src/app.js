@@ -76,8 +76,10 @@ function toast(message, isError = false) {
 }
 
 class Session {
-  constructor(bytes, path, name) {
+  constructor(bytes, path, name, { readOnly = false, password = undefined } = {}) {
     this.state = { bytes, path, name, dirty: false, undo: [], redo: [] };
+    this.readOnly = readOnly; // encrypted docs open view-only
+    this.password = password;
     this.overlayShadow = [];
     this.ocr = new Map(); // pageIndex → words pending bake into the PDF
     this.ocrRunning = false;
@@ -90,6 +92,10 @@ class Session {
     this.thumbsEl = document.createElement('div');
     this.thumbsEl.className = 'thumbs';
     $('thumbs-host').appendChild(this.thumbsEl);
+
+    this.outlineEl = document.createElement('div');
+    this.outlineEl.className = 'outline';
+    $('thumbs-host').appendChild(this.outlineEl);
 
     this.tabEl = document.createElement('div');
     this.tabEl.className = 'tab';
@@ -172,11 +178,12 @@ class Session {
 
   async reload({ keepPage = true } = {}) {
     const page = keepPage ? this.viewer.currentPage : 0;
-    await this.viewer.load(this.state.bytes);
+    await this.viewer.load(this.state.bytes, this.password);
     for (const [i, words] of this.ocr) this.viewer.setOcrPage(i, words); // pending OCR
     this.searcher.reset();
     this.overlays.mountAll();
     this.thumbs.build(this.viewer); // not awaited: thumbnails fill in behind
+    this.buildOutline(); // not awaited either
     if (keepPage && page > 0) this.viewer.goToPage(Math.min(page, this.viewer.pageCount - 1));
     this.overlayShadow = this.overlays.snapshot();
     if (current === this) syncSessionUi();
@@ -184,6 +191,10 @@ class Session {
 
   /** Snapshot for undo, transform bytes, remap overlays, reload. */
   async structuralOp(fn, remapOverlays) {
+    if (this.readOnly) {
+      toast('This document is password-protected and opened read-only.', true);
+      return;
+    }
     this.state.undo.push({ bytes: this.state.bytes, overlays: this.overlays.snapshot() });
     if (this.state.undo.length > UNDO_LIMIT) this.state.undo.shift();
     this.state.redo = [];
@@ -203,6 +214,52 @@ class Session {
   targetPages() {
     const sel = this.thumbs.selection;
     return sel.length ? sel : [this.viewer.currentPage];
+  }
+
+  /** Render the document's bookmark tree into the sidebar's Bookmarks pane. */
+  async buildOutline() {
+    const outline = await this.viewer.getOutline();
+    this.outlineEl.textContent = '';
+    if (!outline || !outline.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No bookmarks in this document.';
+      this.outlineEl.appendChild(empty);
+      return;
+    }
+    const build = (items, parent) => {
+      for (const item of items) {
+        const hasKids = item.items && item.items.length > 0;
+        const details = document.createElement('details');
+        details.open = true;
+        const summary = document.createElement('summary');
+        const row = document.createElement('div');
+        row.className = 'ol-row';
+        const toggle = document.createElement('span');
+        toggle.className = 'ol-toggle';
+        if (hasKids) {
+          toggle.innerHTML = '<span class="tri">▶</span>';
+          toggle.addEventListener('click', (e) => {
+            e.preventDefault();
+            details.open = !details.open;
+          });
+        }
+        const title = document.createElement('span');
+        title.className = 'ol-title';
+        title.textContent = item.title || '(untitled)';
+        title.title = item.title || '';
+        title.addEventListener('click', (e) => {
+          e.preventDefault();
+          if (item.dest) this.viewer.goToDestination(item.dest);
+        });
+        row.append(toggle, title);
+        summary.appendChild(row);
+        details.appendChild(summary);
+        if (hasKids) build(item.items, details);
+        parent.appendChild(details);
+      }
+    };
+    build(outline, this.outlineEl);
   }
 
   /** Re-key pending OCR results after a page operation. mapFn: old → new|null. */
@@ -294,6 +351,10 @@ class Session {
    * text on the next save.
    */
   async runOcr() {
+    if (this.readOnly) {
+      toast('This document is password-protected and opened read-only.', true);
+      return;
+    }
     if (this.ocrRunning) return;
     this.ocrRunning = true;
     try {
@@ -348,8 +409,63 @@ class Session {
     }
   }
 
+  /**
+   * Apply pending redactions destructively: each affected page is re-rendered
+   * at ~300 DPI with the boxes blacked out, and the page's entire original
+   * content is replaced by that image — the redacted content no longer exists
+   * in the file. The flattened page is then re-OCR'd so the surviving text
+   * stays searchable.
+   */
+  async #applyRedactions(data) {
+    const redactions = this.overlays.redactionsByPage();
+    if (!redactions.size) return data;
+    const pages = [...redactions.keys()].sort((a, b) => a - b);
+    for (const pageIndex of pages) {
+      toast(`Applying redactions on page ${pageIndex + 1}…`);
+      const proxy = this.viewer.pages[pageIndex].proxy;
+      const base = proxy.getViewport({ scale: 1 });
+      const S = Math.min(300 / 72, 4000 / Math.max(base.width, base.height));
+      const viewport = proxy.getViewport({ scale: S });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width);
+      canvas.height = Math.floor(viewport.height);
+      const ctx = canvas.getContext('2d');
+      await proxy.render({ canvasContext: ctx, viewport }).promise;
+      ctx.fillStyle = '#000';
+      for (const r of redactions.get(pageIndex)) {
+        ctx.fillRect(r.x * S, r.y * S, r.w * S, r.h * S);
+      }
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      const png = new Uint8Array(await blob.arrayBuffer());
+      const wPts = viewport.width / S;
+      const hPts = viewport.height / S;
+      data = await engine.replacePageWithImage(data, pageIndex, png, wPts, hPts);
+      this.ocr.delete(pageIndex); // stale — the page is new content now
+
+      // Re-OCR the flattened (already blacked-out) pixels for searchability.
+      try {
+        const raw = await recognizeCanvas(canvas);
+        const words = raw
+          .filter((w) => w.confidence >= 40)
+          .map((w) => ({
+            text: w.text,
+            x: w.bbox.x0 / S,
+            y: hPts - w.bbox.y1 / S, // flattened page is unrotated
+            width: (w.bbox.x1 - w.bbox.x0) / S,
+            height: (w.bbox.y1 - w.bbox.y0) / S,
+          }));
+        if (words.length) data = await engine.bakeOcrText(data, [{ pageIndex, words }]);
+      } catch {
+        // OCR is best-effort here; the redaction itself already succeeded
+      }
+    }
+    // overlay cleanup happens in adoptSaved once the write has succeeded
+    return data;
+  }
+
   async buildSaveBytes() {
-    let data = this.state.bytes;
+    if (this.readOnly) return this.state.bytes;
+    let data = await this.#applyRedactions(this.state.bytes);
     if (this.ocr.size) {
       data = await engine.bakeOcrText(
         data,
@@ -368,8 +484,20 @@ class Session {
     return data;
   }
 
+  /** Redactions are irreversible once saved; make the user say so. */
+  #confirmRedactions() {
+    if (!this.overlays.hasRedactions) return true;
+    const n = [...this.overlays.redactionsByPage().values()].flat().length;
+    return window.confirm(
+      `Apply ${n} redaction${n === 1 ? '' : 's'} permanently?\n\n` +
+        'The content under the boxes is destroyed and cannot be recovered from the saved file. ' +
+        'Redacted pages are flattened to images (links and form fields on those pages are removed).'
+    );
+  }
+
   async save() {
     if (!this.state.path) return this.saveAs();
+    if (!this.#confirmRedactions()) return false;
     const data = await this.buildSaveBytes();
     const res = await host.savePdf(this.state.path, data);
     if (!res.ok) {
@@ -382,6 +510,7 @@ class Session {
   }
 
   async saveAs() {
+    if (!this.#confirmRedactions()) return false;
     const res = await host.saveAsDialog(this.state.name || 'document.pdf');
     if (res.canceled) return false;
     const data = await this.buildSaveBytes();
@@ -444,6 +573,7 @@ class Session {
     this.viewer.doc?.destroy();
     this.viewerEl.remove();
     this.thumbsEl.remove();
+    this.outlineEl.remove();
     this.tabEl.remove();
   }
 }
@@ -452,19 +582,147 @@ class Session {
 // Session management
 // ---------------------------------------------------------------------------
 
+function promptPassword(name, wrong) {
+  const dialog = $('pw-dialog');
+  $('pw-message').textContent = wrong
+    ? `Wrong password for "${name}" — try again.`
+    : `"${name}" is password-protected. Enter the password to open it (read-only).`;
+  const input = $('pw-input');
+  input.value = '';
+  return new Promise((resolve) => {
+    const done = (value) => {
+      dialog.close();
+      $('pw-open').onclick = null;
+      $('pw-cancel').onclick = null;
+      input.onkeydown = null;
+      dialog.oncancel = null;
+      resolve(value);
+    };
+    $('pw-open').onclick = () => done(input.value);
+    $('pw-cancel').onclick = () => done(null);
+    dialog.oncancel = () => done(null); // Esc
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter') done(input.value);
+    };
+    dialog.showModal();
+    input.focus();
+  });
+}
+
 async function openBytes(data, path, name) {
   const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  let encrypted = false;
   try {
     await engine.validatePdf(bytes);
   } catch (err) {
-    toast(`${name}: ${err.message}`, true);
-    return null;
+    if (/password-protected/i.test(err.message)) {
+      encrypted = true;
+    } else {
+      toast(`${name}: ${err.message}`, true);
+      return null;
+    }
   }
-  const session = new Session(bytes, path, name);
+
+  const session = new Session(bytes, path, name, { readOnly: encrypted });
   sessions.push(session);
-  await session.reload({ keepPage: false });
+  let wrong = false;
+  while (true) {
+    if (encrypted) {
+      const password = await promptPassword(name, wrong);
+      if (password == null) {
+        sessions.pop();
+        session.destroy();
+        updateTabs();
+        syncSessionUi();
+        return null;
+      }
+      session.password = password;
+    }
+    try {
+      await session.reload({ keepPage: false });
+      break;
+    } catch (err) {
+      if (encrypted && err?.name === 'PasswordException') {
+        wrong = true;
+        continue;
+      }
+      sessions.pop();
+      session.destroy();
+      updateTabs();
+      syncSessionUi();
+      toast(`${name}: could not open (${err.message})`, true);
+      return null;
+    }
+  }
   activateSession(session);
+  if (path) addRecent(path, name);
   return session;
+}
+
+// ---- recent files (Electron only: needs real file paths) ----
+
+function getRecent() {
+  try {
+    return JSON.parse(localStorage.getItem('shelly.recent') || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function addRecent(path, name) {
+  if (!window.shelly || !path) return;
+  const list = getRecent().filter((r) => r.path !== path);
+  list.unshift({ path, name });
+  localStorage.setItem('shelly.recent', JSON.stringify(list.slice(0, 10)));
+  renderRecent();
+}
+
+function removeRecent(path) {
+  localStorage.setItem(
+    'shelly.recent',
+    JSON.stringify(getRecent().filter((r) => r.path !== path))
+  );
+  renderRecent();
+}
+
+function renderRecent() {
+  const wrap = $('recent');
+  const list = window.shelly ? getRecent() : [];
+  wrap.hidden = list.length === 0;
+  const container = $('recent-list');
+  container.textContent = '';
+  for (const r of list) {
+    const item = document.createElement('button');
+    item.className = 'recent-item';
+    const rname = document.createElement('span');
+    rname.className = 'rname';
+    rname.textContent = r.name;
+    const rpath = document.createElement('span');
+    rpath.className = 'rpath';
+    rpath.textContent = r.path;
+    item.append(rname, rpath);
+    item.addEventListener('click', async () => {
+      const res = await host.readFile(r.path);
+      if (!res.ok) {
+        toast(`Could not open ${r.name}: the file may have moved.`, true);
+        removeRecent(r.path);
+        return;
+      }
+      await openBytes(res.data, r.path, res.name);
+    });
+    container.appendChild(item);
+  }
+}
+
+let sidebarMode = 'pages'; // 'pages' | 'marks'
+
+function syncSidebarPanes() {
+  $('side-pages').classList.toggle('active', sidebarMode === 'pages');
+  $('side-marks').classList.toggle('active', sidebarMode === 'marks');
+  for (const s of sessions) {
+    s.thumbsEl.classList.toggle('active', s === current && sidebarMode === 'pages');
+    s.outlineEl.classList.toggle('active', s === current && sidebarMode === 'marks');
+  }
 }
 
 function activateSession(session) {
@@ -472,8 +730,8 @@ function activateSession(session) {
   current = session;
   for (const s of sessions) {
     s.viewerEl.classList.toggle('active', s === session);
-    s.thumbsEl.classList.toggle('active', s === session);
   }
+  syncSidebarPanes();
   closeFind();
   setTool('select');
   // A session laid out while hidden (display:none) saw a zero-width
@@ -510,7 +768,7 @@ function updateTabs() {
   $('tabbar').hidden = sessions.length === 0;
   for (const s of sessions) {
     s.tabEl.classList.toggle('active', s === current);
-    s.tabEl.querySelector('.tab-label').textContent = s.state.name;
+    s.tabEl.querySelector('.tab-label').textContent = (s.readOnly ? '🔒 ' : '') + s.state.name;
     s.tabEl.querySelector('.tab-dirty').textContent = s.state.dirty ? '•' : '';
     s.tabEl.title = s.state.path || s.state.name;
   }
@@ -518,6 +776,7 @@ function updateTabs() {
 
 function syncSessionUi() {
   $('empty-state').classList.toggle('hidden', sessions.length > 0);
+  if (sessions.length === 0) renderRecent();
   if (!current) {
     document.title = 'Shelly PDF';
     $('page-num').value = 1;
@@ -537,12 +796,18 @@ function syncSessionUi() {
 
 function refreshUi() {
   const loaded = !!current;
-  for (const id of ['btn-save', 'btn-save-as', 'btn-print', 'pg-insert', 'btn-ocr']) $(id).disabled = !loaded;
+  const editable = loaded && !current.readOnly;
+  $('btn-save-as').disabled = !loaded; // read-only docs can still be copied
+  $('btn-print').disabled = !loaded;
+  for (const id of ['btn-save', 'pg-insert', 'btn-ocr', 'btn-stamp']) $(id).disabled = !editable;
+  for (const id of ['tool-highlight', 'tool-text', 'tool-note', 'tool-image', 'tool-sign', 'tool-redact']) {
+    $(id).disabled = !editable;
+  }
   $('page-num').disabled = !loaded;
-  $('btn-undo').disabled = !current || !current.state.undo.length;
-  $('btn-redo').disabled = !current || !current.state.redo.length;
+  $('btn-undo').disabled = !editable || !current.state.undo.length;
+  $('btn-redo').disabled = !editable || !current.state.redo.length;
   for (const id of ['pg-rotate-l', 'pg-rotate-r', 'pg-delete', 'pg-extract']) {
-    $(id).disabled = !loaded;
+    $(id).disabled = !editable;
   }
   $('status-file').textContent = current ? current.state.name : 'No document';
   $('status-info').textContent = current
@@ -596,6 +861,7 @@ function setTool(mode) {
     ['tool-text', 'text'],
     ['tool-note', 'note'],
     ['tool-image', 'image'],
+    ['tool-redact', 'redact'],
   ]) {
     $(id).classList.toggle('active', m === mode);
   }
@@ -785,6 +1051,10 @@ $('tool-highlight').addEventListener('click', () => setTool('highlight'));
 $('tool-text').addEventListener('click', () => setTool('text'));
 $('tool-note').addEventListener('click', () => setTool('note'));
 $('tool-image').addEventListener('click', chooseImageTool);
+$('tool-redact').addEventListener('click', () => {
+  setTool('redact');
+  toast('Drag a box over the content to redact. It is removed permanently when you save.');
+});
 $('hl-color').addEventListener('input', (e) => current?.overlays.setHighlightColor(e.target.value));
 $('text-size').addEventListener('change', (e) =>
   current?.overlays.setTextProps({ size: Math.max(6, Math.min(96, Number(e.target.value) || 16)) })
@@ -797,6 +1067,44 @@ $('pg-rotate-r').addEventListener('click', () => current?.rotateSelection(90));
 $('pg-delete').addEventListener('click', () => current?.deleteSelection());
 $('pg-extract').addEventListener('click', () => current?.extractSelection());
 $('pg-insert').addEventListener('click', () => current?.insertPdf());
+
+// ---- sidebar panes ----
+
+$('side-pages').addEventListener('click', () => {
+  sidebarMode = 'pages';
+  syncSidebarPanes();
+});
+$('side-marks').addEventListener('click', () => {
+  sidebarMode = 'marks';
+  syncSidebarPanes();
+});
+
+// ---- watermark dialog ----
+
+const wmDialog = $('wm-dialog');
+$('btn-stamp').addEventListener('click', () => {
+  if (!current || current.readOnly) return;
+  wmDialog.showModal();
+  $('wm-text').focus();
+});
+$('wm-cancel').addEventListener('click', () => wmDialog.close());
+$('wm-apply').addEventListener('click', async () => {
+  if (!current) return;
+  const text = $('wm-text').value.trim();
+  if (!text) {
+    wmDialog.close();
+    return;
+  }
+  const v = parseInt($('wm-color').value.slice(1), 16);
+  const color = { r: ((v >> 16) & 255) / 255, g: ((v >> 8) & 255) / 255, b: (v & 255) / 255 };
+  const opacity = Number($('wm-opacity').value) / 100;
+  const pageIndices = $('wm-scope').value === 'current' ? [current.viewer.currentPage] : null;
+  wmDialog.close();
+  await current.structuralOp((bytes) =>
+    engine.addWatermark(bytes, { text, color, opacity, pageIndices })
+  );
+  toast(`Stamped "${text}" — Ctrl+Z to undo.`);
+});
 
 // ---- find bar ----
 

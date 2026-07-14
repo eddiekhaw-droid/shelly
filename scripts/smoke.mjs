@@ -9,8 +9,9 @@ import { createServer } from 'node:http';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { chromium } from '@playwright/test';
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, PDFHexString, PDFName, StandardFonts, rgb } from 'pdf-lib';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = process.env.SMOKE_OUT || path.join(root, 'scripts', 'out');
@@ -487,6 +488,210 @@ check(
   /8450/.test(nativeText) && /INVOICE/i.test(nativeText),
   nativeText.slice(0, 60)
 );
+
+// ---------------------------------------------------------------------------
+// Round 2: watermark, redaction, password-protected PDFs, bookmarks
+// ---------------------------------------------------------------------------
+
+const openFixtureTab = async (bytes, name) => {
+  await page.evaluate(
+    async ({ b64, name }) => {
+      const data = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      await window.__shellyTest.openBytes(data, null, name);
+    },
+    { b64: Buffer.from(bytes).toString('base64'), name }
+  );
+  await page.waitForFunction(() => window.__shellyTest.viewer?.pages[0]?.rendered === true);
+};
+
+// --- watermark ---
+await openFixtureTab(fixture, 'wm.pdf');
+await page.click('#btn-stamp');
+await page.waitForSelector('#wm-dialog[open]');
+await page.fill('#wm-text', 'DRAFT COPY');
+await page.click('#wm-apply');
+await page.waitForFunction(() => !document.getElementById('btn-undo').disabled);
+await page.waitForFunction(() => window.__shellyTest.viewer.pages[0].rendered === true);
+const wmTint = await page.evaluate(() => {
+  // count reddish pixels in a region around the page center — the diagonal
+  // watermark passes through it (single-pixel probes can land in letter gaps)
+  const t = window.__shellyTest;
+  const p = t.viewer.pages[0];
+  const ratio = p.canvas.width / p.canvas.clientWidth;
+  const size = Math.round(160 * ratio);
+  const cx = Math.round((p.canvas.clientWidth / 2) * ratio - size / 2);
+  const cy = Math.round((p.canvas.clientHeight / 2) * ratio - size / 2);
+  const data = p.canvas.getContext('2d').getImageData(cx, cy, size, size).data;
+  let tinted = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] > data[i + 2] + 8) tinted++; // red channel clearly above blue
+  }
+  return tinted;
+});
+check('watermark tints the page center region', wmTint > 50, `${wmTint} tinted px`);
+await page.click('#btn-undo');
+await page.waitForFunction(() => document.getElementById('btn-undo').disabled);
+check('watermark is undoable', true);
+
+// --- redaction ---
+await openFixtureTab(fixture, 'redact-me.pdf');
+await page.click('#tool-redact');
+const target = await page.evaluate(() => {
+  const span = document.querySelector('.viewer.active .textLayer span'); // "Chapter 1"
+  const r = span.getBoundingClientRect();
+  return { x: r.x, y: r.y, w: r.width, h: r.height };
+});
+await page.mouse.move(target.x - 6, target.y - 6);
+await page.mouse.down();
+await page.mouse.move(target.x + target.w + 6, target.y + target.h + 6, { steps: 6 });
+await page.mouse.up();
+await page.waitForFunction(() =>
+  window.__shellyTest.overlays.items.some((i) => i.type === 'redact')
+);
+check('redaction box drawn', true);
+
+const redactedB64 = await page.evaluate(async () => {
+  const baked = await window.__shellyTest.session.buildSaveBytes();
+  let s = '';
+  const u = new Uint8Array(baked);
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  return btoa(s);
+});
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, null, 'redacted.pdf');
+}, redactedB64);
+await page.waitForFunction(() => window.__shellyTest.viewer?.pages[0]?.rendered === true);
+const redactResult = await page.evaluate(async ({ x, y, w, h }) => {
+  const t = window.__shellyTest;
+  const tc = await t.viewer.pages[0].proxy.getTextContent();
+  const text = tc.items.map((i) => i.str).join(' ');
+  // sample where "Chapter 1" used to be — layout matches (same fit-width page)
+  const p = t.viewer.pages[0];
+  const pr = p.el.getBoundingClientRect();
+  const ratio = p.canvas.width / p.canvas.clientWidth;
+  const px = p.canvas
+    .getContext('2d')
+    .getImageData(
+      Math.round((x + w / 2 - pr.x) * ratio),
+      Math.round((y + h / 2 - pr.y) * ratio),
+      1,
+      1
+    ).data;
+  return { text, px: [...px] };
+}, target);
+check(
+  'redacted text is GONE from the saved file',
+  !/Chapter/i.test(redactResult.text),
+  redactResult.text.slice(0, 50) || '(no text)'
+);
+check(
+  'redacted area is black pixels',
+  redactResult.px[0] < 40 && redactResult.px[1] < 40 && redactResult.px[2] < 40,
+  `rgb=${redactResult.px.slice(0, 3)}`
+);
+check(
+  'surviving text re-OCRed and still searchable',
+  /searchable/i.test(redactResult.text),
+  ''
+);
+await page.screenshot({ path: path.join(outDir, '9-redact.png') });
+
+// --- password-protected PDF (view-only) ---
+const plainDoc = await PDFDocument.create();
+const pfont = await plainDoc.embedFont(StandardFonts.Helvetica);
+plainDoc.addPage([612, 792]).drawText('Top secret figures', { x: 60, y: 700, size: 24, font: pfont });
+const plainPath = path.join(outDir, '_plain.pdf');
+const encPath = path.join(outDir, '_enc.pdf');
+await writeFile(plainPath, await plainDoc.save());
+execFileSync('python3', [
+  '-c',
+  `import pikepdf; pdf = pikepdf.open('${plainPath}'); pdf.save('${encPath}', encryption=pikepdf.Encryption(owner='owner-pw', user='sesame', R=6))`,
+]);
+const encBytes = await readFile(encPath);
+
+await page.evaluate((b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  window.__pwOpen = window.__shellyTest.openBytes(bytes, null, 'secret.pdf');
+}, Buffer.from(encBytes).toString('base64'));
+await page.waitForSelector('#pw-dialog[open]');
+check('password dialog appears for encrypted PDFs', true);
+
+await page.fill('#pw-input', 'wrong-guess');
+await page.click('#pw-open');
+await page.waitForFunction(() =>
+  document.getElementById('pw-message').textContent.includes('Wrong password')
+);
+check('wrong password re-prompts', true);
+
+await page.fill('#pw-input', 'sesame');
+await page.click('#pw-open');
+// wait for the encrypted session to become the active tab, then to render
+await page.waitForFunction(() =>
+  document.querySelector('#tabbar .tab.active .tab-label')?.textContent.includes('🔒')
+);
+await page.waitForFunction(() => window.__shellyTest.viewer?.pages[0]?.rendered === true);
+const pwState = await page.evaluate(async () => {
+  const t = window.__shellyTest;
+  const tc = await t.viewer.pages[0].proxy.getTextContent();
+  return {
+    text: tc.items.map((i) => i.str).join(' '),
+    readOnly: t.session.readOnly,
+    toolsDisabled: document.getElementById('tool-text').disabled,
+    saveDisabled: document.getElementById('btn-save').disabled,
+    lock: document.querySelector('#tabbar .tab.active .tab-label').textContent,
+  };
+});
+check('encrypted PDF opens and renders after correct password', /Top secret/.test(pwState.text));
+check(
+  'encrypted PDF is read-only (editing disabled, lock shown)',
+  pwState.readOnly && pwState.toolsDisabled && pwState.saveDisabled && pwState.lock.includes('🔒'),
+  pwState.lock
+);
+
+// --- bookmarks ---
+async function makeOutlineFixture() {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const pages = [];
+  for (let i = 0; i < 3; i++) {
+    const p = doc.addPage([612, 792]);
+    p.drawText(`Section ${i + 1}`, { x: 40, y: 700, size: 24, font });
+    pages.push(p);
+  }
+  const ctx = doc.context;
+  const outlineRef = ctx.nextRef();
+  const aRef = ctx.nextRef();
+  const bRef = ctx.nextRef();
+  const dest = (p) => ctx.obj([p.ref, PDFName.of('XYZ'), null, null, null]);
+  ctx.assign(
+    aRef,
+    ctx.obj({ Title: PDFHexString.fromText('Introduction'), Parent: outlineRef, Next: bRef, Dest: dest(pages[0]) })
+  );
+  ctx.assign(
+    bRef,
+    ctx.obj({ Title: PDFHexString.fromText('Financials'), Parent: outlineRef, Prev: aRef, Dest: dest(pages[2]) })
+  );
+  ctx.assign(outlineRef, ctx.obj({ Type: 'Outlines', First: aRef, Last: bRef, Count: 2 }));
+  doc.catalog.set(PDFName.of('Outlines'), outlineRef);
+  return doc.save();
+}
+await openFixtureTab(await makeOutlineFixture(), 'outlined.pdf');
+await page.click('#side-marks');
+await page.waitForFunction(() => document.querySelectorAll('.outline.active .ol-title').length === 2);
+const marks = await page.evaluate(() =>
+  [...document.querySelectorAll('.outline.active .ol-title')].map((el) => el.textContent)
+);
+check('bookmarks panel lists the outline', marks.join(',') === 'Introduction,Financials', marks.join(','));
+await page.evaluate(() => {
+  [...document.querySelectorAll('.outline.active .ol-title')]
+    .find((el) => el.textContent === 'Financials')
+    .click();
+});
+await page.waitForFunction(() => window.__shellyTest.viewer.currentPage === 2);
+check('clicking a bookmark jumps to its page', true);
+await page.click('#side-pages');
+await page.screenshot({ path: path.join(outDir, '10-round2.png') });
 
 await browser.close();
 server.close();

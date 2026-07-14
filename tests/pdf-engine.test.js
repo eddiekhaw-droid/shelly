@@ -212,6 +212,45 @@ describe('bakeOverlays', () => {
   });
 });
 
+describe('addWatermark', () => {
+  it('stamps every page by default', async () => {
+    const { addWatermark } = await import('../src/pdf-engine.js');
+    const bytes = await addWatermark(fixture5, {
+      text: 'CONFIDENTIAL',
+      color: { r: 0.8, g: 0.1, b: 0.1 },
+      opacity: 0.15,
+    });
+    expect(bytes.length).toBeGreaterThan(fixture5.length);
+    expect(await getPageCount(bytes)).toBe(5);
+  });
+
+  it('can target specific pages and skips empty text', async () => {
+    const { addWatermark } = await import('../src/pdf-engine.js');
+    const one = await addWatermark(fixture5, {
+      text: 'DRAFT',
+      color: { r: 0, g: 0, b: 0 },
+      pageIndices: [2],
+    });
+    expect(await getPageCount(one)).toBe(5);
+    expect(await addWatermark(fixture5, { text: '   ', color: { r: 0, g: 0, b: 0 } })).toBe(fixture5);
+  });
+});
+
+describe('replacePageWithImage', () => {
+  it('swaps the page for a flat image page of the given size', async () => {
+    const { replacePageWithImage } = await import('../src/pdf-engine.js');
+    const bytes = await replacePageWithImage(fixture5, 1, PNG_BYTES, 612, 792);
+    expect(await getPageCount(bytes)).toBe(5);
+    const { width, height } = await getPageSize(bytes, 1);
+    expect(Math.round(width)).toBe(612);
+    expect(Math.round(height)).toBe(792);
+    expect(await getPageRotation(bytes, 1)).toBe(0);
+    // neighbors untouched
+    expect((await getPageSize(bytes, 0)).width).toBe(100);
+    expect((await getPageSize(bytes, 2)).width).toBe(120);
+  });
+});
+
 describe('bakeOcrText', () => {
   it('adds invisible words without altering page structure', async () => {
     const { bakeOcrText } = await import('../src/pdf-engine.js');

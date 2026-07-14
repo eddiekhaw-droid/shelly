@@ -269,6 +269,18 @@ ipcMain.handle('dialog:save-as', async (_e, defaultName) => {
   return canceled ? { canceled: true } : { canceled: false, path: filePath };
 });
 
+ipcMain.handle('file:read', async (_e, filePath) => {
+  try {
+    return {
+      ok: true,
+      name: path.basename(filePath),
+      data: await fs.promises.readFile(filePath),
+    };
+  } catch (err) {
+    return { ok: false, error: String((err && err.message) || err) };
+  }
+});
+
 ipcMain.handle('file:save', async (_e, filePath, data) => {
   try {
     await fs.promises.writeFile(filePath, Buffer.from(data));
