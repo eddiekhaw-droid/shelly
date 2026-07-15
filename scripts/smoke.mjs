@@ -693,6 +693,33 @@ check('clicking a bookmark jumps to its page', true);
 await page.click('#side-pages');
 await page.screenshot({ path: path.join(outDir, '10-round2.png') });
 
+// --- pdf.js side assets: image codecs (JBIG2/JPEG2000 scans), CJK cmaps,
+// standard fonts. Missing assets = photocopier scans render blank. ---
+const sideAssets = await page.evaluate(async () => {
+  const out = {};
+  out.jbig2 = (await fetch('pdfjs/wasm/jbig2.wasm')).ok;
+  out.openjpeg = (await fetch('pdfjs/wasm/openjpeg.wasm')).ok;
+  out.cmap = (await fetch('pdfjs/cmaps/UniGB-UCS2-H.bcmap')).ok;
+  out.font = (await fetch('pdfjs/standard_fonts/FoxitFixed.pfb')).ok;
+  const wasmBytes = await (await fetch('pdfjs/wasm/jbig2.wasm')).arrayBuffer();
+  out.wasmValid = WebAssembly.validate(wasmBytes);
+  return out;
+});
+check(
+  'pdf.js image codecs, cmaps, and fonts are bundled',
+  Object.values(sideAssets).every(Boolean),
+  JSON.stringify(sideAssets)
+);
+// and the built viewer actually points pdf.js at them
+const { readdir } = await import('node:fs/promises');
+const bundleNames = (await readdir(path.join(root, 'dist', 'assets'))).filter((f) => f.endsWith('.js'));
+let bundleHasUrls = false;
+for (const f of bundleNames) {
+  const src = await readFile(path.join(root, 'dist', 'assets', f), 'utf8');
+  if (src.includes('pdfjs/wasm/') && src.includes('pdfjs/cmaps/')) bundleHasUrls = true;
+}
+check('viewer passes the side-asset URLs to pdf.js', bundleHasUrls);
+
 await browser.close();
 server.close();
 

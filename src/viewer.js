@@ -40,7 +40,18 @@ export class Viewer extends EventTarget {
       this.doc = null;
     }
     // pdf.js takes ownership of (detaches) the buffer, so hand it a copy.
-    this.doc = await pdfjsLib.getDocument({ data: bytes.slice(), password }).promise;
+    // The side-asset URLs make image codecs (JBIG2/JPEG2000 scans), CJK
+    // character maps, and non-embedded standard fonts work — all bundled
+    // locally by scripts/copy-ocr-assets.mjs.
+    this.doc = await pdfjsLib.getDocument({
+      data: bytes.slice(),
+      password,
+      wasmUrl: new URL('pdfjs/wasm/', location.href).href,
+      cMapUrl: new URL('pdfjs/cmaps/', location.href).href,
+      cMapPacked: true,
+      standardFontDataUrl: new URL('pdfjs/standard_fonts/', location.href).href,
+      iccUrl: new URL('pdfjs/iccs/', location.href).href,
+    }).promise;
     this.ocrWords = new Map(); // pageIndex → words from the OCR pass
     this.fieldObjects = await this.doc.getFieldObjects().catch(() => null);
     this.linkService = new SimpleLinkService();
