@@ -1338,6 +1338,8 @@ if (!window.shelly) {
 
 setTool('select');
 syncSessionUi();
+// Build version in the status bar: the quick way to confirm which build runs.
+$('status-version').textContent = `v${typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : 'dev'}`;
 
 // Exposed for the automated browser smoke test.
 window.__shellyTest = {
