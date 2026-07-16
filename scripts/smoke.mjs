@@ -720,6 +720,49 @@ for (const f of bundleNames) {
 }
 check('viewer passes the side-asset URLs to pdf.js', bundleHasUrls);
 
+// --- Edit Text: click an existing line, retype it, original is destroyed ---
+await openFixtureTab(fixture, 'edit-me.pdf');
+await page.click('#tool-edittext');
+const bodySpan = await page.evaluate(() => {
+  const span = [...document.querySelectorAll('.viewer.active .textLayer span')].find((s) =>
+    s.textContent.includes('searchable body')
+  );
+  const r = span.getBoundingClientRect();
+  return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+});
+await page.mouse.click(bodySpan.x, bodySpan.y);
+await page.waitForSelector('.overlay.ov-edittext .ov-edit');
+const prefilled = await page.evaluate(() => document.querySelector('.overlay.ov-edittext .ov-edit').textContent);
+check(
+  'clicking a line pre-fills its text',
+  prefilled.includes('searchable body text on page 1'),
+  prefilled.slice(0, 50)
+);
+// the text is select-all'ed on open: typing replaces the whole line
+await page.keyboard.type('Corrected figure 9999');
+await page.click('#status-file'); // blur commits
+
+const editedB64 = await page.evaluate(async () => {
+  const baked = await window.__shellyTest.session.buildSaveBytes();
+  let s = '';
+  const u = new Uint8Array(baked);
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  return btoa(s);
+});
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, null, 'edited.pdf');
+}, editedB64);
+await page.waitForFunction(() => window.__shellyTest.viewer?.pages[0]?.rendered === true);
+const editResult = await page.evaluate(async () => {
+  const tc = await window.__shellyTest.viewer.pages[0].proxy.getTextContent();
+  return tc.items.map((i) => i.str).join(' ');
+});
+check('replacement text is real, extractable text', /Corrected figure 9999/.test(editResult), editResult.slice(0, 80));
+check('original line is destroyed, not just covered', !/searchable body/i.test(editResult));
+check('rest of the page stays searchable via auto-OCR', /Chapter/i.test(editResult));
+await page.screenshot({ path: path.join(outDir, '11-edittext.png') });
+
 await browser.close();
 server.close();
 

@@ -129,14 +129,19 @@ export async function insertPdf(bytes, otherBytes, atIndex) {
 export async function bakeOverlays(bytes, overlays) {
   if (!overlays.length) return bytes;
   const doc = await load(bytes);
-  let font = null;
+  const fonts = {};
+  const getFont = async (name = 'Helvetica') => {
+    const key = StandardFonts[name] ? name : 'Helvetica';
+    fonts[key] ??= await doc.embedFont(StandardFonts[key]);
+    return fonts[key];
+  };
 
   for (const ov of overlays) {
     const page = doc.getPage(ov.pageIndex);
     const rotate = degrees(page.getRotation().angle);
     if (ov.type === 'text') {
       if (!ov.text.trim()) continue;
-      if (!font) font = await doc.embedFont(StandardFonts.Helvetica);
+      const font = await getFont(ov.font);
       if (ov.bg) {
         // Opaque fill behind the text — used to cover & replace content.
         page.drawRectangle({

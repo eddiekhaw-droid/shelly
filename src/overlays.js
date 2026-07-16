@@ -41,6 +41,10 @@ export class OverlayManager extends EventTarget {
       else if (this.mode === 'note') this.#placeNote(pageIndex, x, y);
       else if (this.mode === 'image' && this.pendingImage) this.#placeImage(pageIndex, x, y);
       else if (this.mode === 'redact') this.#dragRedaction(e, pageEl, pageIndex, x, y);
+      else if (this.mode === 'edittext') {
+        // Line lookup needs async text-content access; the app handles it.
+        this.dispatchEvent(new CustomEvent('edittextrequest', { detail: { pageIndex, x, y } }));
+      }
       e.preventDefault();
     });
 
@@ -68,7 +72,7 @@ export class OverlayManager extends EventTarget {
   setMode(mode) {
     this.mode = mode;
     if (mode !== 'image') this.pendingImage = null;
-    for (const m of ['text', 'image', 'highlight', 'note', 'redact']) {
+    for (const m of ['text', 'image', 'highlight', 'note', 'redact', 'edittext']) {
       this.viewer.root.classList.toggle(`tool-${m}`, mode === m);
     }
   }
@@ -214,6 +218,57 @@ export class OverlayManager extends EventTarget {
     return this.items.some((it) => it.type === 'redact');
   }
 
+  get hasTextEdits() {
+    return this.items.some((it) => it.type === 'edittext');
+  }
+
+  /**
+   * Start editing an existing line of text. The original line's region is
+   * covered (white) and genuinely removed on save; the replacement text is
+   * drawn in its place.
+   * line: { pageIndex, x, y, w, h (view pts bbox), baselineV, text, size,
+   *         font ('Helvetica'|'TimesRoman'|'Courier') }
+   */
+  addEditText(line) {
+    const item = {
+      id: nextId++,
+      type: 'edittext',
+      ...line,
+      committedText: line.text,
+      color: '#1a1a1a',
+    };
+    this.items.push(item);
+    this.#mount(item);
+    this.select(item.id);
+    item.editEl?.focus();
+    // select-all so typing replaces the line outright
+    const range = document.createRange();
+    range.selectNodeContents(item.editEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    this.#changed();
+  }
+
+  /** Pending text edits per page for the save flow (rects + replacements). */
+  editsByPage() {
+    const map = new Map();
+    for (const it of this.items) {
+      if (it.type !== 'edittext') continue;
+      if (!map.has(it.pageIndex)) map.set(it.pageIndex, []);
+      map.get(it.pageIndex).push({
+        rect: { x: it.x, y: it.y, w: it.w, h: it.h },
+        xLeft: it.x,
+        baselineV: it.baselineV,
+        text: it.text,
+        size: it.size,
+        font: it.font,
+        color: hexToRgb(it.color),
+      });
+    }
+    return map;
+  }
+
   /** Map of pageIndex → redaction rects (view points), for the save flow. */
   redactionsByPage() {
     const map = new Map();
@@ -223,6 +278,20 @@ export class OverlayManager extends EventTarget {
       map.get(it.pageIndex).push({ x: it.x, y: it.y, w: it.w, h: it.h });
     }
     return map;
+  }
+
+  /** Drop pending text edits on the given pages (e.g. before a rotation). */
+  dropEditsOnPages(pageIndices) {
+    let dropped = false;
+    this.items = this.items.filter((it) => {
+      if (it.type === 'edittext' && pageIndices.includes(it.pageIndex)) {
+        it.el?.remove();
+        dropped = true;
+        return false;
+      }
+      return true;
+    });
+    return dropped;
   }
 
   /** Remove redaction overlays after they have been applied. */
@@ -262,7 +331,8 @@ export class OverlayManager extends EventTarget {
     this.items = this.items.filter((it) => it !== item);
     item.el?.remove();
     if (this.selectedId === id) this.selectedId = null;
-    // Discarding a never-committed empty text box or note is not an edit.
+    // Discarding a never-committed empty text box or note is not an edit;
+    // removing an edit-text box cancels it (the original line is untouched).
     const emptyDraft = (item.type === 'text' || item.type === 'note') && !item.text.trim();
     if (!emptyDraft) this.#changed();
   }
@@ -327,7 +397,7 @@ export class OverlayManager extends EventTarget {
     el.className = `overlay ov-${item.type}`;
     item.el = el;
 
-    if (item.type === 'text') {
+    if (item.type === 'text' || item.type === 'edittext') {
       // Editable text lives in its own child so sibling controls (✕, resize)
       // never leak into the captured text.
       const edit = document.createElement('div');
@@ -339,7 +409,9 @@ export class OverlayManager extends EventTarget {
         this.#changed(false);
       });
       edit.addEventListener('blur', () => {
-        if (!item.text.trim()) {
+        // A cleared edit-text line is a deliberate "delete this line";
+        // an empty brand-new text box is an abandoned draft.
+        if (item.type === 'text' && !item.text.trim()) {
           this.remove(item.id);
         } else if (item.text !== item.committedText) {
           item.committedText = item.text;
@@ -442,6 +514,13 @@ export class OverlayManager extends EventTarget {
       el.style.fontSize = `${item.size * s}px`;
       el.style.color = item.color;
       el.style.background = item.bg ? '#ffffff' : 'transparent';
+    } else if (item.type === 'edittext') {
+      el.style.fontSize = `${item.size * s}px`;
+      el.style.color = item.color;
+      el.style.minWidth = `${item.w * s}px`;
+      el.style.minHeight = `${item.h * s}px`;
+      const family = { TimesRoman: 'Times, "Times New Roman", serif', Courier: '"Courier New", monospace' };
+      el.style.fontFamily = family[item.font] || 'Helvetica, Arial, sans-serif';
     } else if (item.type === 'note') {
       el.style.width = `${NOTE_SIZE * s}px`;
       el.style.height = `${NOTE_SIZE * s}px`;
@@ -482,7 +561,9 @@ export class OverlayManager extends EventTarget {
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
         if (moved) this.#changed();
-        else if (item.type === 'text' || item.type === 'note') item.editEl?.focus();
+        else if (item.type === 'text' || item.type === 'note' || item.type === 'edittext') {
+          item.editEl?.focus();
+        }
       };
       window.addEventListener('pointermove', onMove);
       window.addEventListener('pointerup', onUp);
@@ -619,7 +700,7 @@ export class OverlayManager extends EventTarget {
           }),
           color: hexToRgb(it.color),
         });
-      } else if (it.type === 'redact') {
+      } else if (it.type === 'redact' || it.type === 'edittext') {
         continue; // applied separately by the save flow, not baked as content
       } else if (it.type === 'note') {
         if (!it.text.trim()) continue;

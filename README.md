@@ -57,6 +57,13 @@ leave your machine.
   fillable right in the viewer; values are written into the file on save
 - **Sign** — draw a signature with the mouse, then stamp it on any page
 
+**Edit existing text**
+- **Edit Text** — click any line of existing text to open it as a pre-filled
+  editable box; retype and save. The original line is genuinely removed (the
+  page is flattened, like redaction) and the replacement is written as real
+  text in a matched size/position with a serif/sans/mono-matched standard font.
+  Line-by-line — no paragraph reflow, and exact corporate fonts aren't matched.
+
 **Add content**
 - **+ Text** — click anywhere on a page to add a text box; set font size and color;
   optional white **Fill** behind the text to cover-and-correct existing content;
@@ -67,8 +74,8 @@ leave your machine.
 - Undo/redo for all edits (`Ctrl+Z` / `Ctrl+Shift+Z`)
 - Unsaved-changes indicator in the title bar and a save prompt before closing
 
-> Note: like all non-Acrobat-Pro tools, Shelly adds content *on top of* pages —
-> it does not rewrite a PDF's existing typeset text. Password-protected PDFs
+> Note: Edit Text replaces lines wholesale (flattening the page); it does not
+> reflow paragraphs or reuse embedded fonts the way Acrobat Pro's Edit PDF does. Password-protected PDFs
 > open read-only (decrypted editing isn't supported). OCR ships with the English
 > model; other languages can be added by dropping the matching traineddata into
 > the OCR assets.

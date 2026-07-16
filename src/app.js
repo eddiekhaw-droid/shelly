@@ -144,6 +144,10 @@ class Session {
       this.markDirty(true);
     });
     this.overlays.addEventListener('imageplaced', () => setTool('select'));
+    this.overlays.addEventListener('edittextrequest', (e) => {
+      const { pageIndex, x, y } = e.detail;
+      this.editTextAt(pageIndex, x, y).catch((err) => toast(err.message, true));
+    });
     this.overlays.addEventListener('selectionchange', (e) => {
       if (current !== this) return;
       const item = e.detail.item;
@@ -216,6 +220,72 @@ class Session {
     return sel.length ? sel : [this.viewer.currentPage];
   }
 
+  /**
+   * Edit Text tool: find the line of existing text at a click point and open
+   * it as a pre-filled editable box. Works on real text and OCR'd words.
+   */
+  async editTextAt(pageIndex, clickX, clickY) {
+    const proxy = this.viewer.pages[pageIndex].proxy;
+    const vp1 = this.viewer.baseViewport(pageIndex);
+    const tc = await proxy.getTextContent();
+
+    // Every text run mapped to view points: left/baseline/width/height.
+    const runs = [];
+    const addRun = (str, transform, width, fontName) => {
+      if (!str?.trim()) return;
+      const h = Math.hypot(transform[2], transform[3]);
+      const [vx, vy] = vp1.convertToViewportPoint(transform[4], transform[5]);
+      runs.push({ str, x: vx, baseline: vy, w: width, h, fontName });
+    };
+    for (const it of tc.items) if ('str' in it) addRun(it.str, it.transform, it.width, it.fontName);
+    for (const it of this.viewer.ocrItems(pageIndex)) addRun(it.str, it.transform, it.width, null);
+
+    // The clicked line: same baseline (±40% of height), then the horizontally
+    // contiguous segment nearest the click (so table columns stay separate).
+    const onLine = runs
+      .filter((r) => clickY >= r.baseline - r.h * 1.15 && clickY <= r.baseline + r.h * 0.4)
+      .sort((a, b) => a.x - b.x);
+    if (!onLine.length) {
+      toast('No text found there — use + Text to add new text.');
+      return;
+    }
+    const segments = [];
+    for (const r of onLine) {
+      const last = segments[segments.length - 1];
+      if (last && r.x - (last.x + last.w) < Math.max(8, r.h * 1.5)) {
+        // continue segment; add a space when the gap looks like a word break
+        const gap = r.x - (last.x + last.w);
+        const needSpace = gap > r.h * 0.22 && !last.text.endsWith(' ') && !r.str.startsWith(' ');
+        last.text += (needSpace ? ' ' : '') + r.str;
+        last.w = r.x + r.w - last.x;
+        last.h = Math.max(last.h, r.h);
+        last.baseline = Math.max(last.baseline, r.baseline);
+      } else {
+        segments.push({ x: r.x, w: r.w, h: r.h, baseline: r.baseline, text: r.str, fontName: r.fontName });
+      }
+    }
+    let seg = segments.find((s) => clickX >= s.x - 4 && clickX <= s.x + s.w + 4);
+    seg ??= segments.reduce((best, s) =>
+      Math.abs(clickX - (s.x + s.w / 2)) < Math.abs(clickX - (best.x + best.w / 2)) ? s : best
+    );
+
+    const family = tc.styles?.[seg.fontName]?.fontFamily || '';
+    const font = /serif/.test(family) && !/sans/.test(family) ? 'TimesRoman' : /mono/.test(family) ? 'Courier' : 'Helvetica';
+
+    this.overlays.addEditText({
+      pageIndex,
+      x: seg.x - 2,
+      y: seg.baseline - seg.h - 2,
+      w: seg.w + 4,
+      h: seg.h * 1.3 + 4,
+      baselineV: seg.baseline,
+      text: seg.text.trim(),
+      size: seg.h,
+      font,
+    });
+    this.markDirty(true);
+  }
+
   /** Render the document's bookmark tree into the sidebar's Bookmarks pane. */
   async buildOutline() {
     const outline = await this.viewer.getOutline();
@@ -281,15 +351,18 @@ class Session {
       })
     );
     const clearedOcr = pages.some((i) => this.ocr.has(i));
+    let clearedEdits = false;
     await this.structuralOp(
       (bytes) => engine.rotatePages(bytes, pages, delta),
       () => {
+        // OCR word positions and pending text edits are tied to the old orientation.
+        clearedEdits = this.overlays.dropEditsOnPages(pages);
         this.overlays.remapAfterRotate(pages, delta, dims);
-        // OCR word positions are tied to the old orientation.
         this.#remapOcr((i) => (pages.includes(i) ? null : i));
       }
     );
     if (clearedOcr) toast('Rotating cleared text recognition on the rotated page(s) — run OCR again.');
+    if (clearedEdits) toast('Rotating discarded pending text edits on the rotated page(s).');
   }
 
   async deleteSelection() {
@@ -418,10 +491,12 @@ class Session {
    */
   async #applyRedactions(data) {
     const redactions = this.overlays.redactionsByPage();
-    if (!redactions.size) return data;
-    const pages = [...redactions.keys()].sort((a, b) => a - b);
+    const edits = this.overlays.editsByPage();
+    if (!redactions.size && !edits.size) return data;
+    const pages = [...new Set([...redactions.keys(), ...edits.keys()])].sort((a, b) => a - b);
+    const replacementTexts = [];
     for (const pageIndex of pages) {
-      toast(`Applying redactions on page ${pageIndex + 1}…`);
+      toast(`Rewriting page ${pageIndex + 1}…`);
       const proxy = this.viewer.pages[pageIndex].proxy;
       const base = proxy.getViewport({ scale: 1 });
       const S = Math.min(300 / 72, 4000 / Math.max(base.width, base.height));
@@ -431,9 +506,14 @@ class Session {
       canvas.height = Math.floor(viewport.height);
       const ctx = canvas.getContext('2d');
       await proxy.render({ canvasContext: ctx, viewport }).promise;
+      // black out redactions, white out lines being replaced
       ctx.fillStyle = '#000';
-      for (const r of redactions.get(pageIndex)) {
+      for (const r of redactions.get(pageIndex) ?? []) {
         ctx.fillRect(r.x * S, r.y * S, r.w * S, r.h * S);
+      }
+      ctx.fillStyle = '#fff';
+      for (const e of edits.get(pageIndex) ?? []) {
+        ctx.fillRect(e.rect.x * S, e.rect.y * S, e.rect.w * S, e.rect.h * S);
       }
       const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
       const png = new Uint8Array(await blob.arrayBuffer());
@@ -442,7 +522,25 @@ class Session {
       data = await engine.replacePageWithImage(data, pageIndex, png, wPts, hPts);
       this.ocr.delete(pageIndex); // stale — the page is new content now
 
-      // Re-OCR the flattened (already blacked-out) pixels for searchability.
+      // Replacement text goes on as real (extractable) text after the flatten;
+      // the flattened page is unrotated, so view points map to user space by
+      // a simple y-flip.
+      for (const e of edits.get(pageIndex) ?? []) {
+        if (!e.text.trim()) continue; // cleared line = deleted line
+        replacementTexts.push({
+          type: 'text',
+          pageIndex,
+          x: e.xLeft,
+          y: hPts - e.baselineV,
+          text: e.text,
+          size: e.size,
+          lineHeight: e.size * 1.25,
+          color: e.color,
+          font: e.font,
+        });
+      }
+
+      // Re-OCR the flattened (already painted-over) pixels for searchability.
       try {
         const raw = await recognizeCanvas(canvas);
         const words = raw
@@ -456,9 +554,10 @@ class Session {
           }));
         if (words.length) data = await engine.bakeOcrText(data, [{ pageIndex, words }]);
       } catch {
-        // OCR is best-effort here; the redaction itself already succeeded
+        // OCR is best-effort here; the rewrite itself already succeeded
       }
     }
+    if (replacementTexts.length) data = await engine.bakeOverlays(data, replacementTexts);
     // overlay cleanup happens in adoptSaved once the write has succeeded
     return data;
   }
@@ -800,7 +899,7 @@ function refreshUi() {
   $('btn-save-as').disabled = !loaded; // read-only docs can still be copied
   $('btn-print').disabled = !loaded;
   for (const id of ['btn-save', 'pg-insert', 'btn-ocr', 'btn-stamp']) $(id).disabled = !editable;
-  for (const id of ['tool-highlight', 'tool-text', 'tool-note', 'tool-image', 'tool-sign', 'tool-redact']) {
+  for (const id of ['tool-highlight', 'tool-text', 'tool-note', 'tool-image', 'tool-sign', 'tool-redact', 'tool-edittext']) {
     $(id).disabled = !editable;
   }
   $('page-num').disabled = !loaded;
@@ -862,6 +961,7 @@ function setTool(mode) {
     ['tool-note', 'note'],
     ['tool-image', 'image'],
     ['tool-redact', 'redact'],
+    ['tool-edittext', 'edittext'],
   ]) {
     $(id).classList.toggle('active', m === mode);
   }
@@ -1054,6 +1154,10 @@ $('tool-image').addEventListener('click', chooseImageTool);
 $('tool-redact').addEventListener('click', () => {
   setTool('redact');
   toast('Drag a box over the content to redact. It is removed permanently when you save.');
+});
+$('tool-edittext').addEventListener('click', () => {
+  setTool('edittext');
+  toast('Click a line of text to edit it. The original is replaced when you save.');
 });
 $('hl-color').addEventListener('input', (e) => current?.overlays.setHighlightColor(e.target.value));
 $('text-size').addEventListener('change', (e) =>

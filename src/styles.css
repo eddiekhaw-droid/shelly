@@ -352,6 +352,25 @@ label.checkbox { display: inline-flex; align-items: center; gap: 3px; cursor: po
   pointer-events: none;
 }
 .viewer.tool-redact .page { cursor: crosshair; }
+.viewer.tool-edittext .page { cursor: text; }
+
+.overlay.ov-edittext {
+  background: #fff;
+  line-height: 1.25;
+  cursor: move;
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+.overlay.ov-edittext .ov-edit {
+  min-width: 12px;
+  min-height: 1em;
+  outline: none;
+  white-space: pre-wrap;
+  user-select: text;
+  cursor: text;
+  font: inherit;
+  color: inherit;
+}
+.overlay.ov-edittext:focus-within { border-color: var(--accent); }
 
 .overlay.ov-note { cursor: move; }
 .ov-note-icon {
