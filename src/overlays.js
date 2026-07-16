@@ -21,7 +21,14 @@ export class OverlayManager extends EventTarget {
     this.mode = 'select'; // 'select' | 'text' | 'image' | 'highlight' | 'note' | 'redact'
     this.pendingImage = null; // {bytes, format, objectUrl, naturalW, naturalH}
     this.selectedId = null;
-    this.defaults = { size: 16, color: '#d92626', bg: false, highlight: '#ffe066', note: '#ffd400' };
+    this.defaults = {
+      size: 16,
+      color: '#d92626',
+      font: 'Helvetica',
+      bg: false,
+      highlight: '#ffe066',
+      note: '#ffd400',
+    };
 
     viewer.addEventListener('layout', () => this.mountAll());
 
@@ -102,6 +109,7 @@ export class OverlayManager extends EventTarget {
       committedText: '',
       size: this.defaults.size,
       color: this.defaults.color,
+      font: this.defaults.font,
       bg: this.defaults.bg,
     };
     this.items.push(item);
@@ -343,16 +351,23 @@ export class OverlayManager extends EventTarget {
     this.dispatchEvent(new CustomEvent('selectionchange', { detail: { item: this.items.find((i) => i.id === id) || null } }));
   }
 
-  /** Apply font size / color / fill to the selected text overlay (and future ones). */
-  setTextProps({ size, color, bg }) {
+  /**
+   * Apply font / size / color / fill to the selected text or edit-text
+   * overlay (and set the defaults for future text boxes).
+   */
+  setTextProps({ size, color, font, bg }) {
     if (size) this.defaults.size = size;
     if (color) this.defaults.color = color;
+    if (font) this.defaults.font = font;
     if (bg !== undefined) this.defaults.bg = bg;
-    const item = this.items.find((i) => i.id === this.selectedId && i.type === 'text');
+    const item = this.items.find(
+      (i) => i.id === this.selectedId && (i.type === 'text' || i.type === 'edittext')
+    );
     if (item) {
       if (size) item.size = size;
       if (color) item.color = color;
-      if (bg !== undefined) item.bg = bg;
+      if (font) item.font = font;
+      if (bg !== undefined && item.type === 'text') item.bg = bg;
       this.#style(item);
       this.#changed();
     }
@@ -510,17 +525,21 @@ export class OverlayManager extends EventTarget {
     }
     el.style.left = `${item.x * s}px`;
     el.style.top = `${item.y * s}px`;
+    const FAMILIES = {
+      TimesRoman: 'Times, "Times New Roman", serif',
+      Courier: '"Courier New", monospace',
+    };
     if (item.type === 'text') {
       el.style.fontSize = `${item.size * s}px`;
       el.style.color = item.color;
       el.style.background = item.bg ? '#ffffff' : 'transparent';
+      el.style.fontFamily = FAMILIES[item.font] || 'Helvetica, Arial, sans-serif';
     } else if (item.type === 'edittext') {
       el.style.fontSize = `${item.size * s}px`;
       el.style.color = item.color;
       el.style.minWidth = `${item.w * s}px`;
       el.style.minHeight = `${item.h * s}px`;
-      const family = { TimesRoman: 'Times, "Times New Roman", serif', Courier: '"Courier New", monospace' };
-      el.style.fontFamily = family[item.font] || 'Helvetica, Arial, sans-serif';
+      el.style.fontFamily = FAMILIES[item.font] || 'Helvetica, Arial, sans-serif';
     } else if (item.type === 'note') {
       el.style.width = `${NOTE_SIZE * s}px`;
       el.style.height = `${NOTE_SIZE * s}px`;
@@ -688,6 +707,7 @@ export class OverlayManager extends EventTarget {
           size: it.size,
           lineHeight: it.size * TEXT_LINE_HEIGHT,
           color: hexToRgb(it.color),
+          font: it.font,
           bg,
         });
       } else if (it.type === 'highlight') {

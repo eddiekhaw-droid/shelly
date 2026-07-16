@@ -151,10 +151,12 @@ class Session {
     this.overlays.addEventListener('selectionchange', (e) => {
       if (current !== this) return;
       const item = e.detail.item;
-      if (item?.type === 'text') {
-        $('text-size').value = item.size;
+      if (item?.type === 'text' || item?.type === 'edittext') {
+        $('text-size').value = Math.round(item.size);
         $('text-color').value = item.color;
+        $('text-font').value = item.font || 'Helvetica';
         $('text-bg').checked = !!item.bg;
+        $('text-bg').parentElement.style.display = item.type === 'text' ? '' : 'none';
         $('text-props').classList.add('visible');
       }
     });
@@ -1164,6 +1166,7 @@ $('text-size').addEventListener('change', (e) =>
   current?.overlays.setTextProps({ size: Math.max(6, Math.min(96, Number(e.target.value) || 16)) })
 );
 $('text-color').addEventListener('input', (e) => current?.overlays.setTextProps({ color: e.target.value }));
+$('text-font').addEventListener('change', (e) => current?.overlays.setTextProps({ font: e.target.value }));
 $('text-bg').addEventListener('change', (e) => current?.overlays.setTextProps({ bg: e.target.checked }));
 
 $('pg-rotate-l').addEventListener('click', () => current?.rotateSelection(-90));

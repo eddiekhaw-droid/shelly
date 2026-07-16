@@ -738,7 +738,32 @@ check(
   prefilled.includes('searchable body text on page 1'),
   prefilled.slice(0, 50)
 );
+// font/size/color controls appear and apply to the edit box
+await page.waitForFunction(() => document.getElementById('text-props').classList.contains('visible'));
+await page.selectOption('#text-font', 'TimesRoman');
+await page.fill('#text-size', '18');
+await page.$eval('#text-size', (el) => el.dispatchEvent(new Event('change')));
+const propsApplied = await page.evaluate(() => {
+  const it = window.__shellyTest.overlays.items.find((i) => i.type === 'edittext');
+  return { font: it.font, size: it.size, family: it.el.style.fontFamily };
+});
+check(
+  'font and size controls apply to the edit box',
+  propsApplied.font === 'TimesRoman' && propsApplied.size === 18 && /Times/.test(propsApplied.family),
+  JSON.stringify(propsApplied)
+);
+
 // the text is select-all'ed on open: typing replaces the whole line
+await page.evaluate(() => {
+  // re-select the contents (the toolbar interaction moved focus)
+  const it = window.__shellyTest.overlays.items.find((i) => i.type === 'edittext');
+  it.editEl.focus();
+  const range = document.createRange();
+  range.selectNodeContents(it.editEl);
+  const sel = window.getSelection();
+  sel.removeAllRanges();
+  sel.addRange(range);
+});
 await page.keyboard.type('Corrected figure 9999');
 await page.click('#status-file'); // blur commits
 
