@@ -4,6 +4,7 @@ import { Viewer } from './viewer.js';
 import { Thumbnails } from './thumbnails.js';
 import { Searcher } from './search.js';
 import { OverlayManager } from './overlays.js';
+import { openArcade, installKonami, currentGame } from './arcade.js';
 
 const $ = (id) => document.getElementById(id);
 const UNDO_LIMIT = 20;
@@ -1088,6 +1089,8 @@ $('sign-use').addEventListener('click', async () => {
 
 $('btn-open').addEventListener('click', openPdfDialog);
 $('empty-open').addEventListener('click', openPdfDialog);
+$('empty-arcade').addEventListener('click', openArcade);
+installKonami();
 $('btn-save').addEventListener('click', () => current?.save());
 $('btn-save-as').addEventListener('click', () => current?.saveAs());
 $('btn-print').addEventListener('click', print);
@@ -1364,6 +1367,10 @@ window.__shellyTest = {
     return current;
   },
   sessionCount: () => sessions.length,
+  openArcade,
+  get arcade() {
+    return currentGame();
+  },
   activate: (i) => activateSession(sessions[i]),
   closeCurrent: () => current && closeSession(current, { force: true }),
 };

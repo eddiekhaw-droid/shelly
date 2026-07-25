@@ -568,6 +568,53 @@ body.drag-over #empty-state, body.drag-over #viewers { outline: 3px dashed var(-
 button.primary { background: var(--accent); color: #fff; }
 button.primary:hover:not(:disabled) { background: #2f6ae8; }
 
+/* ---------- arcade easter egg ---------- */
+
+#empty-arcade {
+  margin-top: 26px;
+  border-color: var(--border);
+  color: var(--dim);
+  font-size: 12px;
+  padding: 5px 12px;
+}
+#empty-arcade:hover { background: var(--chrome); color: var(--text); border-color: var(--dim); }
+
+#arcade {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 13, 0.9);
+}
+#arcade-cab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 18px 12px;
+  background: #17181d;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6);
+}
+#arcade-marquee {
+  font: bold 15px "Courier New", monospace;
+  letter-spacing: 6px;
+  color: var(--accent);
+  text-shadow: 0 0 12px var(--accent-soft);
+}
+#arcade canvas {
+  background: #101116;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  max-width: calc(100vw - 80px);
+  max-height: calc(100vh - 140px);
+  image-rendering: pixelated;
+}
+#arcade-help { font-size: 11px; color: var(--dim); }
+
 /* ---------- print ---------- */
 
 @media print {
