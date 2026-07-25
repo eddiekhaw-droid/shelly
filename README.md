@@ -70,6 +70,12 @@ leave your machine.
   drag to reposition; edits are baked into the PDF when you save
 - **+ Image** — place a PNG/JPEG stamp on a page; drag to move, corner handle to resize
 
+**Arcade** 🕹
+- **Shelly Invaders** — a classic Space Invaders clone hiding on the start
+  screen (or type the Konami code: ↑↑↓↓←→←→BA). Marching alien waves that
+  speed up as they thin out, destructible bunkers, the mystery UFO, and a
+  persistent high score. Esc gets you back to your PDFs.
+
 **Safety**
 - Undo/redo for all edits (`Ctrl+Z` / `Ctrl+Shift+Z`)
 - Unsaved-changes indicator in the title bar and a save prompt before closing
@@ -106,6 +112,7 @@ NSIS installer on Windows) via electron-builder.
 | `npm test` | Unit tests for the PDF edit engine (Vitest) |
 | `node scripts/smoke.mjs` | End-to-end smoke test: drives the built renderer in Chromium — open, render, search, rotate, reorder, delete, overlay bake, undo, zoom |
 | `node scripts/bake-roundtrip.mjs` | Visual check that saved text/images land exactly where they were placed, including on rotated pages |
+| `node scripts/arcade-smoke.mjs` | Drives the Shelly Invaders easter egg in Chromium — open, shoot, score, pause, close, Konami code |
 
 ### Architecture
 
@@ -125,6 +132,7 @@ src/viewer.js         pdf.js rendering: lazy page render, zoom, text layer,
 src/thumbnails.js     Sidebar: selection, drag-to-reorder
 src/search.js         Find bar: match location + highlight painting
 src/overlays.js       Text/image overlay objects and coordinate mapping
+src/arcade.js         Shelly Invaders easter egg (self-contained canvas game)
 ```
 
 The document lives as PDF bytes (source of truth). Structural edits run through
