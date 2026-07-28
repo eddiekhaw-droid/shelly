@@ -867,6 +867,44 @@ check(
   `normalized to ${quirky.format}`
 );
 
+// --- dragging an overlay onto another page re-homes it (paste on page N,
+// drag to page N+1, save: it must survive on the page it was dropped on) ---
+await page.evaluate(() => window.__shellyTest.viewer.setZoom(0.5)); // several pages visible
+await page.waitForFunction(() => window.__shellyTest.viewer.pages[0].rendered === true);
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  window.__shellyTest.viewer.goToPage(0);
+  await window.__shellyTest.pasteImageBytes(bytes, 'png');
+}, tableB64);
+const dragBoxes = await page.evaluate(() => {
+  const ov = document.querySelector('.viewer.active .overlay.ov-image').getBoundingClientRect();
+  const pages = document.querySelectorAll('.viewer.active .page');
+  const target = pages[1].getBoundingClientRect();
+  return {
+    from: { x: ov.x + ov.width / 2, y: ov.y + ov.height / 2 },
+    to: { x: target.x + target.width / 2, y: target.y + target.height / 2 },
+  };
+});
+await page.mouse.move(dragBoxes.from.x, dragBoxes.from.y);
+await page.mouse.down();
+await page.mouse.move(dragBoxes.to.x, dragBoxes.to.y, { steps: 8 });
+await page.mouse.up();
+const rehomed = await page.evaluate(async () => {
+  const t = window.__shellyTest;
+  const it = t.overlays.items.find((i) => i.type === 'image');
+  const vp = t.viewer.baseViewport(it.pageIndex);
+  const onPage = it.y >= 0 && it.y + it.h <= vp.height + 1;
+  const payload = t.overlays.bakePayload().find((p) => p.type === 'image');
+  const baked = await t.engine.bakeOverlays(t.state.bytes, [payload]);
+  t.overlays.remove(it.id);
+  return { pageIndex: it.pageIndex, onPage, grew: baked.length > t.state.bytes.length };
+});
+check(
+  'cross-page drag re-homes the overlay to the drop page',
+  rehomed.pageIndex === 1 && rehomed.onPage && rehomed.grew,
+  JSON.stringify(rehomed)
+);
+
 // --- erase & replace: erase the red header bar on page 1, drop an image in ---
 await page.evaluate(() => window.__shellyTest.viewer.goToPage(0)); // scroll back up
 await page.click('#tool-erase');

@@ -638,11 +638,13 @@ export class OverlayManager extends EventTarget {
         item.y = origY + dy;
         this.#style(item);
       };
-      const onUp = () => {
+      const onUp = (ev) => {
         window.removeEventListener('pointermove', onMove);
         window.removeEventListener('pointerup', onUp);
-        if (moved) this.#changed();
-        else if (item.type === 'text' || item.type === 'note' || item.type === 'edittext') {
+        if (moved) {
+          this.#rehomeAfterDrag(item, ev);
+          this.#changed();
+        } else if (item.type === 'text' || item.type === 'note' || item.type === 'edittext') {
           item.editEl?.focus();
         }
       };
@@ -650,6 +652,37 @@ export class OverlayManager extends EventTarget {
       window.addEventListener('pointerup', onUp);
       e.preventDefault();
     });
+  }
+
+  /**
+   * After a drag, move the overlay to the page it was dropped on (dragging
+   * visually across pages otherwise leaves it owned by the old page at
+   * off-page coordinates — where it would vanish on save), then clamp it
+   * into the page bounds.
+   */
+  #rehomeAfterDrag(item, ev) {
+    // An edit-text box must stay on the line it is replacing.
+    if (item.type === 'edittext' || item.type === 'highlight') return;
+    const s = this.viewer.scale;
+    const dropPage = document
+      .elementsFromPoint(ev.clientX, ev.clientY)
+      .find((el) => el.classList?.contains('page'));
+    const newIndex = dropPage ? Number(dropPage.dataset.page) : null;
+    if (newIndex != null && newIndex !== item.pageIndex) {
+      const oldRect = this.viewer.pages[item.pageIndex].el.getBoundingClientRect();
+      const newRect = dropPage.getBoundingClientRect();
+      item.x += (oldRect.left - newRect.left) / s;
+      item.y += (oldRect.top - newRect.top) / s;
+      item.pageIndex = newIndex;
+      this.#mount(item); // re-attach into the new page's overlay layer
+    }
+    // keep it on the page either way
+    const vp = this.viewer.baseViewport(item.pageIndex);
+    const w = item.w ?? (item.el ? item.el.offsetWidth / s : 0);
+    const h = item.h ?? (item.el ? item.el.offsetHeight / s : 0);
+    item.x = Math.min(Math.max(item.x, 0), Math.max(0, vp.width - Math.min(w, vp.width)));
+    item.y = Math.min(Math.max(item.y, 0), Math.max(0, vp.height - Math.min(h, vp.height)));
+    this.#style(item);
   }
 
   #wireResize(item, handle) {
