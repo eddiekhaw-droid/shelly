@@ -621,7 +621,13 @@ class Session {
   async save() {
     if (!this.state.path) return this.saveAs();
     if (!this.#confirmRedactions()) return false;
-    const data = await this.buildSaveBytes();
+    let data;
+    try {
+      data = await this.buildSaveBytes();
+    } catch (err) {
+      toast(`Save failed while preparing the document: ${err.message}`, true);
+      return false;
+    }
     const res = await host.savePdf(this.state.path, data);
     if (!res.ok) {
       toast(`Could not save: ${res.error}`, true);
@@ -636,7 +642,13 @@ class Session {
     if (!this.#confirmRedactions()) return false;
     const res = await host.saveAsDialog(this.state.name || 'document.pdf');
     if (res.canceled) return false;
-    const data = await this.buildSaveBytes();
+    let data;
+    try {
+      data = await this.buildSaveBytes();
+    } catch (err) {
+      toast(`Save failed while preparing the document: ${err.message}`, true);
+      return false;
+    }
     const write = await host.savePdf(res.path, data);
     if (!write.ok) {
       toast(`Could not save: ${write.error}`, true);
@@ -1279,13 +1291,18 @@ window.addEventListener('paste', async (e) => {
   const active = document.activeElement;
   if (active && (active.isContentEditable || /^(input|textarea)$/i.test(active.tagName))) return;
   const items = [...(e.clipboardData?.items || [])];
-  const imageItem = items.find((it) => /^image\/(png|jpe?g)$/.test(it.type));
+  const imageItem = items.find((it) => /^image\//.test(it.type));
   if (!imageItem) return;
   e.preventDefault();
   const file = imageItem.getAsFile();
   if (!file) return;
   const bytes = new Uint8Array(await file.arrayBuffer());
-  await pasteImageBytes(bytes, file.type.includes('png') ? 'png' : 'jpeg');
+  const format = file.type.includes('jpeg') || file.type.includes('jpg') ? 'jpeg' : 'png';
+  try {
+    await pasteImageBytes(bytes, format);
+  } catch (err) {
+    toast(`Could not paste that image: ${err.message}`, true);
+  }
 });
 
 // ---- sidebar panes ----

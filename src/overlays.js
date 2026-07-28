@@ -5,6 +5,8 @@
 // Overlay coordinates are stored in *view points*: the page's viewport at
 // scale 1 (so they are zoom-independent), origin top-left, y down.
 
+import { PDFDocument } from 'pdf-lib';
+
 // Keep in sync with the .ov-text CSS (line-height / font metrics): the first
 // baseline of a DOM line box sits roughly at (LH-1)/2 + ascent from the top.
 const TEXT_LINE_HEIGHT = 1.25;
@@ -85,18 +87,35 @@ export class OverlayManager extends EventTarget {
     }
   }
 
-  setPendingImage(bytes, format) {
+  async setPendingImage(bytes, format) {
     const blob = new Blob([bytes], { type: format === 'png' ? 'image/png' : 'image/jpeg' });
     const objectUrl = URL.createObjectURL(blob);
     const img = new Image();
-    return new Promise((resolve, reject) => {
-      img.onload = () => {
-        this.pendingImage = { bytes, format, objectUrl, naturalW: img.naturalWidth, naturalH: img.naturalHeight };
-        resolve();
-      };
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
       img.onerror = reject;
       img.src = objectUrl;
     });
+
+    // Images from emails/clipboard come in flavors pdf-lib can't always embed
+    // (CMYK JPEGs, interlaced PNGs, BMP-mislabeled data…). Verify it embeds;
+    // if not, re-encode through a canvas to a plain baseline PNG. Better a
+    // slightly larger file than an image that silently vanishes on save.
+    try {
+      const scratch = await PDFDocument.create();
+      if (format === 'png') await scratch.embedPng(bytes);
+      else await scratch.embedJpg(bytes);
+    } catch {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      const pngBlob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+      bytes = new Uint8Array(await pngBlob.arrayBuffer());
+      format = 'png';
+    }
+
+    this.pendingImage = { bytes, format, objectUrl, naturalW: img.naturalWidth, naturalH: img.naturalHeight };
   }
 
   #placeText(pageIndex, x, y) {

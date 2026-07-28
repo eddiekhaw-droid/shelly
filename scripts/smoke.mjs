@@ -838,6 +838,35 @@ await page.evaluate(() => {
   window.__shellyTest.overlays.remove(it.id); // keep the erase test clean
 });
 
+// --- quirky image formats (like email images) are normalized so they can't
+// vanish on save: a JPEG mislabeled as PNG must still embed and survive ---
+const quirkyJpegB64 = await page.evaluate(() => {
+  const c = document.createElement('canvas');
+  c.width = 200;
+  c.height = 200;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#8e44ad';
+  ctx.fillRect(0, 0, 200, 200);
+  return c.toDataURL('image/jpeg', 0.9).split(',')[1]; // JPEG bytes…
+});
+const quirky = await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.pasteImageBytes(bytes, 'png'); // …claimed to be PNG
+  const it = window.__shellyTest.overlays.items.find((i) => i.type === 'image');
+  const payload = window.__shellyTest.overlays.bakePayload().find((p) => p.type === 'image');
+  const baked = await window.__shellyTest.engine.bakeOverlays(
+    window.__shellyTest.state.bytes,
+    [payload]
+  );
+  window.__shellyTest.overlays.remove(it.id);
+  return { format: payload.format, grew: baked.length > window.__shellyTest.state.bytes.length };
+}, quirkyJpegB64);
+check(
+  'mislabeled/quirky images are normalized and still save',
+  quirky.format === 'png' && quirky.grew,
+  `normalized to ${quirky.format}`
+);
+
 // --- erase & replace: erase the red header bar on page 1, drop an image in ---
 await page.evaluate(() => window.__shellyTest.viewer.goToPage(0)); // scroll back up
 await page.click('#tool-erase');
