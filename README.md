@@ -64,6 +64,15 @@ leave your machine.
   text in a matched size/position with a serif/sans/mono-matched standard font.
   Line-by-line — no paragraph reflow, and exact corporate fonts aren't matched.
 
+**Replace & rebuild content**
+- **Erase** — drag a box over an outdated picture/table/area; it's blanked on
+  save (destructively, like redaction), with an optional replacement picture
+  fitted into the box
+- **Paste from clipboard** — Ctrl+V drops a copied image onto the current page
+  (e.g. an Excel table copied as a picture), movable and resizable
+- **Insert blank page** (sidebar) — sized like its neighbor; fill it with
+  text, images, or pasted content
+
 **Add content**
 - **+ Text** — click anywhere on a page to add a text box; set font size and color;
   optional white **Fill** behind the text to cover-and-correct existing content;

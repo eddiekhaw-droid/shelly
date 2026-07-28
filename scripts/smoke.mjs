@@ -788,6 +788,127 @@ check('original line is destroyed, not just covered', !/searchable body/i.test(e
 check('rest of the page stays searchable via auto-OCR', /Chapter/i.test(editResult));
 await page.screenshot({ path: path.join(outDir, '11-edittext.png') });
 
+// ---------------------------------------------------------------------------
+// Erase & replace picture, insert blank page, paste image from clipboard
+// ---------------------------------------------------------------------------
+
+await openFixtureTab(fixture, 'replace-pic.pdf');
+
+// --- insert blank page after page 1 ---
+await page.click('.thumbs.active .thumb:nth-child(1)');
+await page.click('#pg-blank');
+await page.waitForFunction(() => document.querySelectorAll('.viewer.active .page').length === 4);
+check('blank page inserted', (await page.textContent('#page-total')).trim() === '/ 4');
+const blankIsWhite = await page.evaluate(async () => {
+  const t = window.__shellyTest;
+  await t.viewer.renderPage(1);
+  const c = t.viewer.pages[1].canvas;
+  const d = c.getContext('2d').getImageData(0, 0, c.width, Math.min(200, c.height)).data;
+  for (let i = 0; i < d.length; i += 400) if (d[i] < 250) return false;
+  return true;
+});
+check('inserted page is blank white', blankIsWhite);
+
+// --- paste an image (like an Excel table copied as a picture) ---
+const tableB64 = await page.evaluate(() => {
+  const c = document.createElement('canvas');
+  c.width = 600;
+  c.height = 200;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, 600, 200);
+  ctx.strokeStyle = '#1a3f9e';
+  ctx.lineWidth = 3;
+  for (let r = 0; r <= 4; r++) { ctx.beginPath(); ctx.moveTo(0, r * 50); ctx.lineTo(600, r * 50); ctx.stroke(); }
+  for (let col = 0; col <= 3; col++) { ctx.beginPath(); ctx.moveTo(col * 200, 0); ctx.lineTo(col * 200, 200); ctx.stroke(); }
+  ctx.fillStyle = '#111';
+  ctx.font = '24px Arial';
+  ctx.fillText('EIF.999 NEW SCHEDULE', 20, 32);
+  return c.toDataURL('image/png').split(',')[1];
+});
+const pasted = await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const ok = await window.__shellyTest.pasteImageBytes(bytes, 'png');
+  const it = window.__shellyTest.overlays.items.find((i) => i.type === 'image');
+  return { ok, placed: !!it, pageIndex: it?.pageIndex };
+}, tableB64);
+check('clipboard image pastes onto the current page', pasted.ok && pasted.placed, `page=${pasted.pageIndex}`);
+await page.evaluate(() => {
+  const it = window.__shellyTest.overlays.items.find((i) => i.type === 'image');
+  window.__shellyTest.overlays.remove(it.id); // keep the erase test clean
+});
+
+// --- erase & replace: erase the red header bar on page 1, drop an image in ---
+await page.evaluate(() => window.__shellyTest.viewer.goToPage(0)); // scroll back up
+await page.click('#tool-erase');
+const headerBox = await page.evaluate(() => {
+  const p = document.querySelector('.viewer.active .page');
+  const r = p.getBoundingClientRect();
+  return { x: r.x, y: r.y, w: r.width };
+});
+await page.mouse.move(headerBox.x + 10, headerBox.y + 8);
+await page.mouse.down();
+await page.mouse.move(headerBox.x + headerBox.w - 10, headerBox.y + 60, { steps: 5 });
+await page.mouse.up();
+await page.waitForSelector('#erase-dialog[open]');
+check('erase dialog offers replacement', true);
+await page.click('#erase-only');
+const eraseItem = await page.evaluate(() => {
+  const it = window.__shellyTest.overlays.items.find((i) => i.type === 'erase');
+  return it ? { pageIndex: it.pageIndex, x: it.x, y: it.y, w: it.w, h: it.h } : null;
+});
+check('erase box recorded', !!eraseItem && eraseItem.w > 100);
+
+// programmatic replacement image into the erased area (file pickers can't be
+// automated) — same code path as the dialog's "Choose picture…"
+await page.evaluate(
+  async ({ b64, rect }) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const t = window.__shellyTest;
+    await t.overlays.setPendingImage(bytes, 'png');
+    t.overlays.placeImageInRect(0, rect);
+  },
+  { b64: tableB64, rect: eraseItem }
+);
+
+const replacedB64 = await page.evaluate(async () => {
+  const baked = await window.__shellyTest.session.buildSaveBytes();
+  let s = '';
+  const u = new Uint8Array(baked);
+  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+  return btoa(s);
+});
+await page.evaluate(async (b64) => {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  await window.__shellyTest.openBytes(bytes, null, 'replaced.pdf');
+}, replacedB64);
+await page.waitForFunction(() => window.__shellyTest.viewer?.pages[0]?.rendered === true);
+const replacedPx = await page.evaluate((rect) => {
+  const t = window.__shellyTest;
+  const p = t.viewer.pages[0];
+  const s = t.viewer.scale;
+  const ratio = p.canvas.width / p.canvas.clientWidth;
+  const ctx = p.canvas.getContext('2d');
+  // a spot inside the erased strip but left of the centered fitted image:
+  // was red header, must be white now
+  const corner = ctx.getImageData(
+    Math.round((rect.x + 5) * s * ratio),
+    Math.round((rect.y + rect.h / 2) * s * ratio),
+    1,
+    1
+  ).data;
+  // the replacement image's grid line color should appear somewhere in the strip
+  const band = ctx.getImageData(0, Math.round(rect.y * s * ratio), p.canvas.width, Math.round(rect.h * s * ratio)).data;
+  let blueish = 0;
+  for (let i = 0; i < band.length; i += 40) {
+    if (band[i + 2] > 120 && band[i + 2] > band[i] + 40) blueish++;
+  }
+  return { corner: [...corner].slice(0, 3), blueish };
+}, eraseItem);
+check('erased area is white (old content gone)', replacedPx.corner.every((v) => v > 240), `rgb=${replacedPx.corner}`);
+check('replacement picture rendered in the erased area', replacedPx.blueish > 20, `${replacedPx.blueish} px`);
+await page.screenshot({ path: path.join(outDir, '12-replace.png') });
+
 await browser.close();
 server.close();
 

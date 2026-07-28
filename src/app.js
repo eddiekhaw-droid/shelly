@@ -145,6 +145,7 @@ class Session {
       this.markDirty(true);
     });
     this.overlays.addEventListener('imageplaced', () => setTool('select'));
+    wireEraseDialog(this);
     this.overlays.addEventListener('edittextrequest', (e) => {
       const { pageIndex, x, y } = e.detail;
       this.editTextAt(pageIndex, x, y).catch((err) => toast(err.message, true));
@@ -397,6 +398,20 @@ class Session {
     }
   }
 
+  async insertBlank() {
+    const sel = this.thumbs.selection;
+    const at = sel.length ? sel[sel.length - 1] + 1 : this.viewer.pageCount;
+    await this.structuralOp(
+      (bytes) => engine.insertBlankPage(bytes, at),
+      () => {
+        this.overlays.remapAfterInsert(at, 1);
+        this.#remapOcr((i) => (i >= at ? i + 1 : i));
+      }
+    );
+    this.viewer.goToPage(at);
+    toast('Blank page inserted — use + Text, + Image, or Ctrl+V to fill it.');
+  }
+
   async insertPdf() {
     const res = await host.openPdf();
     if (res.canceled) return;
@@ -494,9 +509,12 @@ class Session {
    */
   async #applyRedactions(data) {
     const redactions = this.overlays.redactionsByPage();
+    const erases = this.overlays.erasesByPage();
     const edits = this.overlays.editsByPage();
-    if (!redactions.size && !edits.size) return data;
-    const pages = [...new Set([...redactions.keys(), ...edits.keys()])].sort((a, b) => a - b);
+    if (!redactions.size && !erases.size && !edits.size) return data;
+    const pages = [...new Set([...redactions.keys(), ...erases.keys(), ...edits.keys()])].sort(
+      (a, b) => a - b
+    );
     const replacementTexts = [];
     for (const pageIndex of pages) {
       toast(`Rewriting page ${pageIndex + 1}…`);
@@ -515,6 +533,9 @@ class Session {
         ctx.fillRect(r.x * S, r.y * S, r.w * S, r.h * S);
       }
       ctx.fillStyle = '#fff';
+      for (const r of erases.get(pageIndex) ?? []) {
+        ctx.fillRect(r.x * S, r.y * S, r.w * S, r.h * S);
+      }
       for (const e of edits.get(pageIndex) ?? []) {
         ctx.fillRect(e.rect.x * S, e.rect.y * S, e.rect.w * S, e.rect.h * S);
       }
@@ -901,8 +922,8 @@ function refreshUi() {
   const editable = loaded && !current.readOnly;
   $('btn-save-as').disabled = !loaded; // read-only docs can still be copied
   $('btn-print').disabled = !loaded;
-  for (const id of ['btn-save', 'pg-insert', 'btn-ocr', 'btn-stamp']) $(id).disabled = !editable;
-  for (const id of ['tool-highlight', 'tool-text', 'tool-note', 'tool-image', 'tool-sign', 'tool-redact', 'tool-edittext']) {
+  for (const id of ['btn-save', 'pg-insert', 'pg-blank', 'btn-ocr', 'btn-stamp']) $(id).disabled = !editable;
+  for (const id of ['tool-highlight', 'tool-text', 'tool-note', 'tool-image', 'tool-sign', 'tool-redact', 'tool-erase', 'tool-edittext']) {
     $(id).disabled = !editable;
   }
   $('page-num').disabled = !loaded;
@@ -964,6 +985,7 @@ function setTool(mode) {
     ['tool-note', 'note'],
     ['tool-image', 'image'],
     ['tool-redact', 'redact'],
+    ['tool-erase', 'erase'],
     ['tool-edittext', 'edittext'],
   ]) {
     $(id).classList.toggle('active', m === mode);
@@ -1160,6 +1182,10 @@ $('tool-redact').addEventListener('click', () => {
   setTool('redact');
   toast('Drag a box over the content to redact. It is removed permanently when you save.');
 });
+$('tool-erase').addEventListener('click', () => {
+  setTool('erase');
+  toast('Drag a box over the picture or area to erase.');
+});
 $('tool-edittext').addEventListener('click', () => {
   setTool('edittext');
   toast('Click a line of text to edit it. The original is replaced when you save.');
@@ -1177,6 +1203,90 @@ $('pg-rotate-r').addEventListener('click', () => current?.rotateSelection(90));
 $('pg-delete').addEventListener('click', () => current?.deleteSelection());
 $('pg-extract').addEventListener('click', () => current?.extractSelection());
 $('pg-insert').addEventListener('click', () => current?.insertPdf());
+$('pg-blank').addEventListener('click', () => current?.insertBlank());
+
+// ---- erase & replace picture ----
+
+const eraseDialog = $('erase-dialog');
+let pendingEraseItem = null;
+
+function wireEraseDialog(session) {
+  session.overlays.addEventListener('eraseplaced', (e) => {
+    if (current !== session) return;
+    pendingEraseItem = e.detail.item;
+    eraseDialog.showModal();
+  });
+}
+
+$('erase-cancel').addEventListener('click', () => {
+  if (pendingEraseItem) current?.overlays.remove(pendingEraseItem.id);
+  pendingEraseItem = null;
+  eraseDialog.close();
+});
+$('erase-only').addEventListener('click', () => {
+  pendingEraseItem = null;
+  eraseDialog.close();
+  setTool('select');
+});
+$('erase-replace').addEventListener('click', async () => {
+  eraseDialog.close();
+  const item = pendingEraseItem;
+  pendingEraseItem = null;
+  if (!current || !item) return;
+  const res = await host.openImage();
+  if (res.canceled) {
+    setTool('select');
+    return; // erase box stays; user can delete it if unwanted
+  }
+  try {
+    await current.overlays.setPendingImage(
+      res.data instanceof Uint8Array ? res.data : new Uint8Array(res.data),
+      res.format
+    );
+    current.overlays.placeImageInRect(item.pageIndex, {
+      x: item.x,
+      y: item.y,
+      w: item.w,
+      h: item.h,
+    });
+    setTool('select');
+    toast('Picture placed — drag or resize it, then Save.');
+  } catch {
+    toast('That image could not be read.', true);
+  }
+});
+
+// ---- paste an image from the clipboard (e.g. a table copied in Excel) ----
+
+async function pasteImageBytes(bytes, format) {
+  if (!current || current.readOnly) return false;
+  const pageIndex = current.viewer.currentPage;
+  const vp = current.viewer.baseViewport(pageIndex);
+  await current.overlays.setPendingImage(bytes, format);
+  // fitted into a centered box ~70% of the page
+  current.overlays.placeImageInRect(pageIndex, {
+    x: vp.width * 0.15,
+    y: vp.height * 0.15,
+    w: vp.width * 0.7,
+    h: vp.height * 0.7,
+  });
+  setTool('select');
+  toast('Pasted — drag or resize the picture, then Save.');
+  return true;
+}
+
+window.addEventListener('paste', async (e) => {
+  const active = document.activeElement;
+  if (active && (active.isContentEditable || /^(input|textarea)$/i.test(active.tagName))) return;
+  const items = [...(e.clipboardData?.items || [])];
+  const imageItem = items.find((it) => /^image\/(png|jpe?g)$/.test(it.type));
+  if (!imageItem) return;
+  e.preventDefault();
+  const file = imageItem.getAsFile();
+  if (!file) return;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  await pasteImageBytes(bytes, file.type.includes('png') ? 'png' : 'jpeg');
+});
 
 // ---- sidebar panes ----
 
@@ -1373,4 +1483,5 @@ window.__shellyTest = {
   },
   activate: (i) => activateSession(sessions[i]),
   closeCurrent: () => current && closeSession(current, { force: true }),
+  pasteImageBytes,
 };

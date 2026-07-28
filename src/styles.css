@@ -352,6 +352,19 @@ label.checkbox { display: inline-flex; align-items: center; gap: 3px; cursor: po
   pointer-events: none;
 }
 .viewer.tool-redact .page { cursor: crosshair; }
+
+.overlay.ov-erase {
+  background: rgba(255, 255, 255, 0.85);
+  border: 1.5px dashed var(--accent);
+  cursor: move;
+}
+.erase-rubber {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.6);
+  border: 1.5px dashed var(--accent);
+  pointer-events: none;
+}
+.viewer.tool-erase .page { cursor: crosshair; }
 .viewer.tool-edittext .page { cursor: text; }
 
 .overlay.ov-edittext {
@@ -543,7 +556,7 @@ body.drag-over #empty-state, body.drag-over #viewers { outline: 3px dashed var(-
   cursor: crosshair;
   touch-action: none;
 }
-#wm-dialog, #pw-dialog {
+#wm-dialog, #pw-dialog, #erase-dialog {
   background: var(--chrome);
   color: var(--text);
   border: 1px solid var(--border);
@@ -551,8 +564,9 @@ body.drag-over #empty-state, body.drag-over #viewers { outline: 3px dashed var(-
   padding: 16px;
   width: min(420px, 90vw);
 }
-#wm-dialog::backdrop, #pw-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
-#wm-dialog h3, #pw-dialog h3 { margin: 0 0 10px; font-weight: 500; }
+#wm-dialog::backdrop, #pw-dialog::backdrop, #erase-dialog::backdrop { background: rgba(0, 0, 0, 0.55); }
+#wm-dialog h3, #pw-dialog h3, #erase-dialog h3 { margin: 0 0 10px; font-weight: 500; }
+#erase-dialog p { margin: 0 0 6px; }
 .dialog-grid {
   display: grid;
   grid-template-columns: 70px 1fr;

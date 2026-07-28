@@ -98,6 +98,16 @@ export async function extractPages(bytes, pageIndices) {
   return out.save();
 }
 
+/** Insert an empty page at `atIndex`, sized like the page before it (or A4). */
+export async function insertBlankPage(bytes, atIndex) {
+  const doc = await load(bytes);
+  const at = Math.max(0, Math.min(atIndex, doc.getPageCount()));
+  const neighbor = doc.getPage(Math.max(0, Math.min(at - 1, doc.getPageCount() - 1)));
+  const { width, height } = neighbor.getSize();
+  doc.insertPage(at, [width, height]);
+  return doc.save();
+}
+
 /** Insert every page of `otherBytes` into `bytes` starting at `atIndex`. */
 export async function insertPdf(bytes, otherBytes, atIndex) {
   const doc = await load(bytes);

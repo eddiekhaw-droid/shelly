@@ -41,6 +41,7 @@
       <button id="tool-image" class="tool" title="Place an image on a page">+ Image</button>
       <button id="tool-sign" class="tool" title="Draw a signature and place it">Sign</button>
       <button id="tool-redact" class="tool" title="Drag a box over content to redact — permanently removed on save">Redact</button>
+      <button id="tool-erase" class="tool" title="Drag a box to erase an area (or replace a picture) — applied on save">Erase</button>
     </div>
     <button id="btn-stamp" disabled title="Stamp a diagonal watermark across pages">Stamp</button>
     <span id="text-props">
@@ -84,6 +85,7 @@
         <button id="pg-delete" class="icon" title="Delete page(s)" disabled>&#128465;</button>
         <button id="pg-extract" class="icon" title="Extract page(s) to a new PDF" disabled>&#8659;</button>
         <button id="pg-insert" class="icon" title="Insert pages from another PDF" disabled>&#10133;</button>
+        <button id="pg-blank" class="icon" title="Insert a blank page" disabled>&#9645;</button>
       </div>
       <div id="thumbs-host"></div>
     </aside>
@@ -138,6 +140,18 @@
       <span class="spacer"></span>
       <button id="wm-cancel">Cancel</button>
       <button id="wm-apply" class="primary">Apply</button>
+    </div>
+  </dialog>
+
+  <dialog id="erase-dialog">
+    <h3>Erase area</h3>
+    <p class="dim">This area will be blanked out when you save. Replace it with a picture?
+    (Tip: you can also copy a table in Excel and press Ctrl+V to paste it as a picture.)</p>
+    <div class="dialog-row">
+      <button id="erase-cancel">Remove box</button>
+      <span class="spacer"></span>
+      <button id="erase-only">Just erase</button>
+      <button id="erase-replace" class="primary">Choose picture&hellip;</button>
     </div>
   </dialog>
 

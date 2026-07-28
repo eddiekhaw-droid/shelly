@@ -18,7 +18,7 @@ export class OverlayManager extends EventTarget {
     super();
     this.viewer = viewer;
     this.items = []; // {id,type,pageIndex,x,y,...} — see below
-    this.mode = 'select'; // 'select' | 'text' | 'image' | 'highlight' | 'note' | 'redact'
+    this.mode = 'select'; // select|text|image|highlight|note|redact|edittext|erase
     this.pendingImage = null; // {bytes, format, objectUrl, naturalW, naturalH}
     this.selectedId = null;
     this.defaults = {
@@ -48,6 +48,7 @@ export class OverlayManager extends EventTarget {
       else if (this.mode === 'note') this.#placeNote(pageIndex, x, y);
       else if (this.mode === 'image' && this.pendingImage) this.#placeImage(pageIndex, x, y);
       else if (this.mode === 'redact') this.#dragRedaction(e, pageEl, pageIndex, x, y);
+      else if (this.mode === 'erase') this.#dragRedaction(e, pageEl, pageIndex, x, y, 'erase');
       else if (this.mode === 'edittext') {
         // Line lookup needs async text-content access; the app handles it.
         this.dispatchEvent(new CustomEvent('edittextrequest', { detail: { pageIndex, x, y } }));
@@ -79,7 +80,7 @@ export class OverlayManager extends EventTarget {
   setMode(mode) {
     this.mode = mode;
     if (mode !== 'image') this.pendingImage = null;
-    for (const m of ['text', 'image', 'highlight', 'note', 'redact', 'edittext']) {
+    for (const m of ['text', 'image', 'highlight', 'note', 'redact', 'edittext', 'erase']) {
       this.viewer.root.classList.toggle(`tool-${m}`, mode === m);
     }
   }
@@ -184,10 +185,10 @@ export class OverlayManager extends EventTarget {
     }
   }
 
-  /** Rubber-band drawing of a redaction box. */
-  #dragRedaction(e, pageEl, pageIndex, startX, startY) {
+  /** Rubber-band drawing of a redaction (black) or erase (white) box. */
+  #dragRedaction(e, pageEl, pageIndex, startX, startY, kind = 'redact') {
     const rubber = document.createElement('div');
-    rubber.className = 'redact-rubber';
+    rubber.className = kind === 'erase' ? 'erase-rubber' : 'redact-rubber';
     this.viewer.pages[pageIndex].ovLayer.appendChild(rubber);
     let cur = { x: startX, y: startY, w: 0, h: 0 };
     const update = (ev) => {
@@ -212,11 +213,14 @@ export class OverlayManager extends EventTarget {
       window.removeEventListener('pointerup', finish);
       rubber.remove();
       if (cur.w < 4 || cur.h < 4) return;
-      const item = { id: nextId++, type: 'redact', pageIndex, ...cur };
+      const item = { id: nextId++, type: kind, pageIndex, ...cur };
       this.items.push(item);
       this.#mount(item);
       this.select(item.id);
       this.#changed();
+      if (kind === 'erase') {
+        this.dispatchEvent(new CustomEvent('eraseplaced', { detail: { item } }));
+      }
     };
     window.addEventListener('pointermove', update);
     window.addEventListener('pointerup', finish);
@@ -277,15 +281,27 @@ export class OverlayManager extends EventTarget {
     return map;
   }
 
-  /** Map of pageIndex → redaction rects (view points), for the save flow. */
-  redactionsByPage() {
+  /** Map of pageIndex → rects (view points) of a box type, for the save flow. */
+  #rectsByPage(type) {
     const map = new Map();
     for (const it of this.items) {
-      if (it.type !== 'redact') continue;
+      if (it.type !== type) continue;
       if (!map.has(it.pageIndex)) map.set(it.pageIndex, []);
       map.get(it.pageIndex).push({ x: it.x, y: it.y, w: it.w, h: it.h });
     }
     return map;
+  }
+
+  redactionsByPage() {
+    return this.#rectsByPage('redact');
+  }
+
+  erasesByPage() {
+    return this.#rectsByPage('erase');
+  }
+
+  get hasErases() {
+    return this.items.some((it) => it.type === 'erase');
   }
 
   /** Drop pending text edits on the given pages (e.g. before a rotation). */
@@ -318,6 +334,33 @@ export class OverlayManager extends EventTarget {
       this.#style(item);
       this.#changed();
     }
+  }
+
+  /** Place the pending image fitted inside a rect (view points), centered. */
+  placeImageInRect(pageIndex, rect) {
+    if (!this.pendingImage) return null;
+    const { bytes, format, objectUrl, naturalW, naturalH } = this.pendingImage;
+    const scale = Math.min(rect.w / naturalW, rect.h / naturalH);
+    const w = naturalW * scale;
+    const h = naturalH * scale;
+    const item = {
+      id: nextId++,
+      type: 'image',
+      pageIndex,
+      x: rect.x + (rect.w - w) / 2,
+      y: rect.y + (rect.h - h) / 2,
+      w,
+      h,
+      bytes,
+      format,
+      objectUrl,
+    };
+    this.items.push(item);
+    this.#mount(item);
+    this.select(item.id);
+    this.#changed();
+    this.pendingImage = null;
+    return item;
   }
 
   #placeImage(pageIndex, x, y) {
@@ -465,7 +508,7 @@ export class OverlayManager extends EventTarget {
         r.className = 'ov-hl-rect';
         el.appendChild(r);
       }
-    } else if (item.type === 'redact') {
+    } else if (item.type === 'redact' || item.type === 'erase') {
       const resize = document.createElement('div');
       resize.className = 'ov-resize';
       el.appendChild(resize);
@@ -662,7 +705,7 @@ export class OverlayManager extends EventTarget {
       }
       let bw;
       let bh;
-      if (it.type === 'image' || it.type === 'redact') {
+      if (it.type === 'image' || it.type === 'redact' || it.type === 'erase') {
         bw = it.w;
         bh = it.h;
       } else if (it.type === 'note') {
@@ -674,7 +717,7 @@ export class OverlayManager extends EventTarget {
       const mapped = mapBox({ x: it.x, y: it.y, w: bw, h: bh }, W, H);
       it.x = mapped.x;
       it.y = mapped.y;
-      if (it.type === 'image' || it.type === 'redact') {
+      if (it.type === 'image' || it.type === 'redact' || it.type === 'erase') {
         it.w = mapped.w;
         it.h = mapped.h;
       }
@@ -720,7 +763,7 @@ export class OverlayManager extends EventTarget {
           }),
           color: hexToRgb(it.color),
         });
-      } else if (it.type === 'redact' || it.type === 'edittext') {
+      } else if (it.type === 'redact' || it.type === 'erase' || it.type === 'edittext') {
         continue; // applied separately by the save flow, not baked as content
       } else if (it.type === 'note') {
         if (!it.text.trim()) continue;

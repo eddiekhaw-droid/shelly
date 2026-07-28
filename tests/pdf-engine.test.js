@@ -104,6 +104,22 @@ describe('extractPages', () => {
   });
 });
 
+describe('insertBlankPage', () => {
+  it('inserts an empty page sized like its neighbor', async () => {
+    const { insertBlankPage } = await import('../src/pdf-engine.js');
+    const bytes = await insertBlankPage(fixture5, 2);
+    expect(await getPageCount(bytes)).toBe(6);
+    // neighbor before the insertion point is old page 1 (width 110)
+    expect(await widths(bytes)).toEqual([100, 110, 110, 120, 130, 140]);
+  });
+
+  it('clamps to the end', async () => {
+    const { insertBlankPage } = await import('../src/pdf-engine.js');
+    const bytes = await insertBlankPage(fixture5, 99);
+    expect(await widths(bytes)).toEqual([100, 110, 120, 130, 140, 140]);
+  });
+});
+
 describe('insertPdf', () => {
   it('inserts all pages of another PDF at the given position', async () => {
     const other = await makeFixture(2, 300); // widths 300, 310

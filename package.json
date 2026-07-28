@@ -1,7 +1,7 @@
 {
   "name": "shelly",
   "productName": "Shelly PDF",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A desktop PDF reader & editor: view, search, organize pages, add text and images.",
   "author": "eddiekhaw <eddiekhaw@gmail.com>",
   "license": "MIT",
