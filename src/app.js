@@ -878,6 +878,7 @@ function activateSession(session) {
   ) {
     session.viewer.setZoom(session.viewer.zoomMode).then(syncSessionUi);
   }
+  session.viewer.refreshCurrentPage(); // page tracking is paused while hidden
   updateTabs();
   syncSessionUi();
 }

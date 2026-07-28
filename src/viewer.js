@@ -20,7 +20,7 @@ export class Viewer extends EventTarget {
     this.doc = null;
     this.pages = []; // { proxy, el, canvas, textLayerDiv, hlLayer, ovLayer, viewport, rendered }
     this.scale = 1;
-    this.zoomMode = 'fit-width'; // 'fit-width' | 'fit-page' | number
+    this.zoomMode = 1; // number (1 = 100%) | 'fit-width' | 'fit-page'
     this.currentPage = 0;
     this.observer = null;
 
@@ -400,8 +400,16 @@ export class Viewer extends EventTarget {
     return [...byName].map(([name, value]) => ({ name, value }));
   }
 
+  /** Re-evaluate which page is current (e.g. right after a hidden tab is shown). */
+  refreshCurrentPage() {
+    this.#trackCurrentPage();
+  }
+
   #trackCurrentPage() {
     if (!this.pages.length) return;
+    // In a hidden tab every offsetTop is 0, which would wrongly elect the
+    // last page as current; wait until the viewer is actually visible.
+    if (!this.root.clientHeight) return;
     const probe = this.root.scrollTop + Math.min(200, this.root.clientHeight / 3);
     let best = 0;
     for (let i = 0; i < this.pages.length; i++) {

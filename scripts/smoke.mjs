@@ -511,6 +511,10 @@ await page.waitForSelector('#wm-dialog[open]');
 await page.fill('#wm-text', 'DRAFT COPY');
 await page.click('#wm-apply');
 await page.waitForFunction(() => !document.getElementById('btn-undo').disabled);
+// the freshly opened tab must still consider page 1 current (regression:
+// hidden-tab loads used to elect the last page)
+const wmCurrent = await page.evaluate(() => window.__shellyTest.viewer.currentPage);
+check('newly opened tab stays on page 1 after an edit', wmCurrent === 0, `currentPage=${wmCurrent}`);
 await page.waitForFunction(() => window.__shellyTest.viewer.pages[0].rendered === true);
 const wmTint = await page.evaluate(() => {
   // count reddish pixels in a region around the page center — the diagonal
